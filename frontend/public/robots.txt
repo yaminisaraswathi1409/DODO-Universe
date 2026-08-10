@@ -1,0 +1,9 @@
+User-agent: *
+Allow: /
+Allow: /categories
+Allow: /opportunities
+
+Disallow: /dashboard/
+Disallow: /api/
+
+Sitemap: https://uop.platform/sitemap.xml
