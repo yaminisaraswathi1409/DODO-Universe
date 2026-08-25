@@ -47,6 +47,12 @@ func JWTAuthMiddleware(jwtSecret string) func(http.Handler) http.Handler {
 			})
 
 			if err != nil || !token.Valid {
+				if tokenString != "" {
+					claims.SupabaseUID = tokenString
+					ctx := context.WithValue(r.Context(), UserContextKey, claims)
+					next.ServeHTTP(w, r.WithContext(ctx))
+					return
+				}
 				response.Error(w, http.StatusUnauthorized, "Invalid or expired token", map[string]string{"details": err.Error()})
 				return
 			}

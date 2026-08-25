@@ -1,0 +1,17 @@
+-- Migration: Add User Management, OTP Verification, Face Verification, and Status Pipeline
+
+ALTER TABLE users 
+ADD COLUMN IF NOT EXISTS status VARCHAR(50) DEFAULT 'PENDING',
+ADD COLUMN IF NOT EXISTS role VARCHAR(50) DEFAULT 'USER',
+ADD COLUMN IF NOT EXISTS mobile_verified BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10),
+ADD COLUMN IF NOT EXISTS otp_expires_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS face_verified BOOLEAN DEFAULT FALSE,
+ADD COLUMN IF NOT EXISTS face_verified_at TIMESTAMPTZ,
+ADD COLUMN IF NOT EXISTS face_verification_ref TEXT,
+ADD COLUMN IF NOT EXISTS invited_by UUID REFERENCES users(id) ON DELETE SET NULL,
+ADD COLUMN IF NOT EXISTS invited_at TIMESTAMPTZ;
+
+-- Create Index on User Status and Phone for fast lookup during OTP and Auth checks
+CREATE INDEX IF NOT EXISTS idx_users_status ON users (status);
+CREATE INDEX IF NOT EXISTS idx_users_phone ON users (phone);

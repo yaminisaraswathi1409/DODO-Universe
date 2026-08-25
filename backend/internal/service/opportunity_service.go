@@ -110,3 +110,11 @@ func (s *OpportunityService) ListPublicOpportunities(ctx context.Context, catego
 
 	return s.oppRepo.ListPublicListings(ctx, categorySlug, oppType, limit, offset)
 }
+
+func (s *OpportunityService) UpdateOpportunityStatus(ctx context.Context, id uuid.UUID, status domain.OpportunityStatus) error {
+	return s.oppRepo.UpdateStatus(ctx, id, status)
+}
+
+func (s *OpportunityService) GetStatusHistory(ctx context.Context, id uuid.UUID) ([]*domain.OpportunityStatusHistory, error) {
+	return s.oppRepo.GetStatusHistory(ctx, id)
+}

@@ -41,9 +41,11 @@ func main() {
 	// Initialize Repositories
 	var userRepo *postgres.UserRepository
 	var oppRepo *postgres.OpportunityRepository
+	var logisticsRepo *postgres.LogisticsRepository
 	if db != nil {
 		userRepo = postgres.NewUserRepository(db)
 		oppRepo = postgres.NewOpportunityRepository(db)
+		logisticsRepo = postgres.NewLogisticsRepository(db)
 	}
 
 	// Initialize Workflow Plugin Engine
@@ -51,14 +53,25 @@ func main() {
 
 	// Initialize Services
 	var oppService *service.OpportunityService
+	var userService *service.UserService
+	var logisticsService *service.LogisticsService
+
 	if oppRepo != nil && userRepo != nil {
 		oppService = service.NewOpportunityService(oppRepo, userRepo, workflowRegistry)
+	}
+	if userRepo != nil {
+		userService = service.NewUserService(userRepo)
+	}
+	if logisticsRepo != nil && oppRepo != nil && userRepo != nil {
+		logisticsService = service.NewLogisticsService(logisticsRepo, oppRepo, userRepo)
 	}
 
 	// Initialize Handlers
 	var authHandler *handler.AuthHandler
 	var oppHandler *handler.OpportunityHandler
 	var catHandler *handler.CategoryHandler
+	var userMgmtHandler *handler.UserManagementHandler
+	var logisticsHandler *handler.LogisticsHandler
 
 	if userRepo != nil {
 		authHandler = handler.NewAuthHandler(userRepo)
@@ -69,6 +82,13 @@ func main() {
 	if db != nil {
 		catHandler = handler.NewCategoryHandler(db)
 	}
+	if userService != nil && userRepo != nil {
+		userMgmtHandler = handler.NewUserManagementHandler(userService, userRepo)
+	}
+	if logisticsService != nil {
+		logisticsHandler = handler.NewLogisticsHandler(logisticsService)
+	}
+	uploadHandler := handler.NewUploadHandler("./public/uploads")
 
 	// Setup Chi Router
 	r := chi.NewRouter()
@@ -90,6 +110,9 @@ func main() {
 		MaxAge:           300,
 	}))
 
+	// Serve Uploaded Files (Images, PDFs, Videos)
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./public/uploads"))))
+
 	// API Routes
 	r.Route("/api/v1", func(r chi.Router) {
 		// Health check
@@ -101,7 +124,7 @@ func main() {
 			})
 		})
 
-		// Public Endpoints (Categories, Public Opportunities for SEO / Flutter)
+		// Category endpoints
 		r.Get("/categories", func(w http.ResponseWriter, r *http.Request) {
 			if catHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -109,6 +132,100 @@ func main() {
 			}
 			catHandler.List(w, r)
 		})
+
+		r.Post("/categories", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.Create(w, r)
+		})
+
+		r.Delete("/categories/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.Delete(w, r)
+		})
+
+		// User Services endpoints
+		r.Get("/users/services", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.GetUserServices(w, r)
+		})
+
+		r.Post("/users/services", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AddUserService(w, r)
+		})
+
+		r.Post("/users/services/documents", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.SubmitServiceDocuments(w, r)
+		})
+
+		// Secure File Upload Endpoint
+		r.Post("/upload", uploadHandler.HandleFileUpload)
+
+		// Admin Service Request & Category Governance Endpoints
+		r.Get("/admin/services/requests", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.ListServiceRequests(w, r)
+		})
+
+		r.Post("/admin/services/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AdminApproveServiceRequest(w, r)
+		})
+
+		r.Post("/admin/services/{id}/review-documents", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AdminReviewServiceDocuments(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/requirements", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateRequirements(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/opportunity-fields", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateOpportunityFields(w, r)
+		})
+
+		r.Post("/users/status", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.UpdateStatus(w, r)
+		})
+
 
 		r.Get("/opportunities/public", func(w http.ResponseWriter, r *http.Request) {
 			if oppHandler == nil {
@@ -125,6 +242,116 @@ func main() {
 			}
 			oppHandler.GetByID(w, r)
 		})
+
+		r.Post("/opportunities/{id}/status", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.UpdateStatus(w, r)
+		})
+
+		r.Get("/opportunities/{id}/history", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.GetStatusHistory(w, r)
+		})
+
+		// OTP Verification & User Management Public endpoints
+		r.Post("/users/verify-otp", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.VerifyOTP(w, r)
+		})
+
+		r.Post("/auth/request-otp", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.RequestOTP(w, r)
+		})
+
+		r.Post("/auth/signup", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.Signup(w, r)
+		})
+
+
+		r.Post("/users/complete-profile", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.CompleteProfile(w, r)
+		})
+
+		r.Post("/users/verify-face", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.VerifyFace(w, r)
+		})
+
+		r.Get("/users/list", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.ListUsers(w, r)
+		})
+
+		// Saved Addresses endpoints
+		r.Get("/users/{userId}/addresses", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.GetUserAddresses(w, r)
+		})
+
+		r.Post("/users/{userId}/addresses", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.CreateUserAddress(w, r)
+		})
+
+		r.Put("/users/{userId}/addresses/{addressId}", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.UpdateUserAddress(w, r)
+		})
+
+		r.Put("/users/{userId}/addresses/{addressId}/default", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.SetDefaultUserAddress(w, r)
+		})
+
+		r.Delete("/users/{userId}/addresses/{addressId}", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.DeleteUserAddress(w, r)
+		})
+
+
+
 
 		// Authenticated Routes (Protected by Supabase JWT validation middleware)
 		r.Group(func(r chi.Router) {
@@ -145,6 +372,23 @@ func main() {
 					return
 				}
 				authHandler.GetMe(w, r)
+			})
+
+			// User Management Module Routes
+			r.Post("/users/invite", func(w http.ResponseWriter, r *http.Request) {
+				if userMgmtHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				userMgmtHandler.Invite(w, r)
+			})
+
+			r.Get("/users/onboarding-status", func(w http.ResponseWriter, r *http.Request) {
+				if userMgmtHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				userMgmtHandler.GetOnboardingStatus(w, r)
 			})
 
 			// Opportunity Management & Spatial Matching
@@ -172,6 +416,21 @@ func main() {
 				oppHandler.CreateChainChild(w, r)
 			})
 		})
+
+		// Logistics & Emergency Scenario 1 Endpoints
+		if logisticsHandler != nil {
+			r.Post("/voice/parse", logisticsHandler.ParseVoice)
+			r.Get("/parts/search", logisticsHandler.SearchParts)
+			r.Post("/parts/checkout", logisticsHandler.CheckoutPart)
+			r.Post("/logistics/pairings", logisticsHandler.CreateVehicleDriverPairing)
+			r.Get("/opportunities/{id}/tree", logisticsHandler.GetTree)
+			r.Post("/logistics/cascade", logisticsHandler.TriggerCascade)
+			r.Post("/logistics/sos", logisticsHandler.ReportSOSIncident)
+			r.Post("/logistics/manifest", logisticsHandler.GenerateWayManifest)
+			r.Post("/logistics/manifest/pol", logisticsHandler.UploadPOL)
+			r.Post("/logistics/manifest/pod", logisticsHandler.UploadPOD)
+			r.Post("/escrow/settle/{root_id}", logisticsHandler.SettleEscrow)
+		}
 	})
 
 	server := &http.Server{
