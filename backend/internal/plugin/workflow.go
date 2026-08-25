@@ -50,6 +50,14 @@ func (r *WorkflowRegistry) Get(model domain.WorkflowModel) (OpportunityWorkflow,
 	return plugin, nil
 }
 
+func (r *WorkflowRegistry) ListPlugins() []string {
+	models := make([]string, 0, len(r.plugins))
+	for k := range r.plugins {
+		models = append(models, string(k))
+	}
+	return models
+}
+
 // ----------------------------------------------------
 // 1. Instant Match Plugin (Taxi, Food, Fast Delivery)
 // ----------------------------------------------------

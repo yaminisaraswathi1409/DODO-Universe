@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from 'next';
 import '../styles/globals.css';
+import { CartProvider } from '@/context/CartContext';
 
 export const metadata: Metadata = {
   title: 'Universal Opportunity Platform | AI Voice-First Ecosystem',
@@ -63,7 +64,7 @@ export default function RootLayout({
         />
       </head>
       <body className="bg-[#090d16] text-slate-100 antialiased min-h-screen flex flex-col selection:bg-blue-500 selection:text-white">
-        {children}
+        <CartProvider>{children}</CartProvider>
       </body>
     </html>
   );
