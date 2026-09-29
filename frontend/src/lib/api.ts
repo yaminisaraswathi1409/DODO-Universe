@@ -89,8 +89,10 @@ export interface UserServiceAsset {
   status: 'PENDING_APPROVAL' | 'APPROVED' | 'DOCUMENTS_PENDING' | 'UNDER_REVIEW' | 'VERIFICATION_PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED';
   rejection_reason?: string;
   documents?: Record<string, any>;
+  attributes?: Record<string, any>;
   created_at?: string;
   updated_at?: string;
+  [key: string]: any;
 }
 
 
@@ -279,7 +281,7 @@ export async function createOpportunity(payload: Partial<Opportunity>, jwtToken?
   return json.data;
 }
 
-export async function updateOpportunityStatus(id: string, status: string): Promise<Opportunity | null> {
+export async function updateOpportunityStatus(id: string, status: string, userId?: string, notes?: string): Promise<Opportunity | null> {
   const token = getStoredAuthToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -290,12 +292,113 @@ export async function updateOpportunityStatus(id: string, status: string): Promi
   const res = await fetch(`${API_BASE_URL}/opportunities/${id}/status`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, user_id: userId, notes }),
   });
   if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.data;
+  const data = await res.json();
+  return data.data;
 }
+
+export interface DeliveryCalculationResult {
+  is_eligible: boolean;
+  unit_price: number;
+  subtotal: number;
+  distance_km: number;
+  delivery_charge: number;
+  transport_charge: number;
+  driver_charge: number;
+  driver_included: boolean;
+  loading_charge: number;
+  unloading_charge: number;
+  service_fee: number;
+  total_charges: number;
+  final_payable: number;
+  rejection_reason?: string;
+  [key: string]: any;
+}
+
+export async function calculateDeliveryFee(req: any): Promise<DeliveryCalculationResult> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/logistics/calculate-delivery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const json = await res.json();
+    return json.data;
+  } catch {
+    return {
+      is_eligible: true,
+      unit_price: req.unit_price || 0,
+      subtotal: (req.unit_price || 0) * (req.quantity || 1),
+      distance_km: 10,
+      delivery_charge: 50,
+      transport_charge: 0,
+      driver_charge: 0,
+      driver_included: true,
+      loading_charge: 0,
+      unloading_charge: 0,
+      service_fee: 20,
+      total_charges: 70,
+      final_payable: ((req.unit_price || 0) * (req.quantity || 1)) + 70,
+    };
+  }
+}
+
+export async function getMatchingOpportunities(userIdent: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/opportunities/matching?user_id=${userIdent}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getAcceptedOpportunities(userIdent: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/opportunities/accepted?user_id=${userIdent}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function verifyPharmacyPickup(oppIdOrData: any, data?: any): Promise<any> {
+  try {
+    const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
+    const res = await fetch(`${API_BASE_URL}/logistics/manifest/pickup-verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
+    if (!res.ok) return false;
+    const json = await res.json();
+    return json.data || true;
+  } catch {
+    return false;
+  }
+}
+
+export async function confirmTransportResources(oppIdOrData: any, data?: any): Promise<any> {
+  try {
+    const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
+    const targetId = typeof oppIdOrData === 'string' ? oppIdOrData : (oppIdOrData?.opportunity_id || '');
+    const res = await fetch(`${API_BASE_URL}/opportunities/${targetId}/confirm-resources`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
 
 // PostGIS Proximity Spatial Matching
 export async function getSpatialMatches(oppID: string, jwtToken?: string): Promise<SpatialMatch[]> {
@@ -940,15 +1043,24 @@ export function clearUserSession(): void {
 
 export interface VendorCatalogItem {
   id: string;
+  vendor_asset_id?: string;
+  vendor_asset?: UserServiceAsset;
   vendor_user_id: string;
+  vendor_user?: UserProfile;
   category_id?: string;
+  category?: Category;
   title: string;
   description?: string;
+  sku?: string;
   unit_price: number;
-  pricing_model?: string;
-  unit_label?: string;
+  price_unit: string;
+  stock_quantity?: number;
+  min_order_quantity?: number;
+  images?: string[];
   attributes?: Record<string, any>;
-  is_available?: boolean;
+  is_available: boolean;
+  created_at?: string;
+  updated_at?: string;
   [key: string]: any;
 }
 
@@ -963,18 +1075,82 @@ export interface ProviderOffer {
   [key: string]: any;
 }
 
-export async function searchCatalog(query?: string, categoryId?: string): Promise<any> {
+export async function searchCatalog(query = '', categorySlug = '', page = 1, limit = 50): Promise<{ items: VendorCatalogItem[]; total: number }> {
   try {
     const params = new URLSearchParams();
     if (query) params.append('q', query);
-    if (categoryId) params.append('category_id', categoryId);
-    const res = await fetch(`${API_BASE_URL}/catalog/search?${params.toString()}`, { cache: 'no-store' });
-    if (!res.ok) return [];
+    if (categorySlug && categorySlug !== 'ALL') params.append('category', categorySlug);
+    params.append('page', page.toString());
+    params.append('limit', limit.toString());
+
+    const res = await fetch(`${API_BASE_URL}/catalog/search?${params.toString()}`);
+    if (!res.ok) return { items: [], total: 0 };
     const json = await res.json();
-    return json.data || [];
+    return {
+      items: json.data?.items || [],
+      total: json.data?.total || 0,
+    };
   } catch {
-    return [];
+    return { items: [], total: 0 };
   }
+}
+
+export async function getVendorCatalog(vendorId: string): Promise<{ vendor: UserProfile; assets: UserServiceAsset[]; items: VendorCatalogItem[] } | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/vendors/${vendorId}/catalog`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function createCatalogItem(item: Partial<VendorCatalogItem>): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to create catalog item');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function updateCatalogItem(id: string, item: Partial<VendorCatalogItem>): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to update catalog item');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function deleteCatalogItem(id: string, vendorUserId: string): Promise<boolean> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}?vendor_user_id=${vendorUserId}`, {
+    method: 'DELETE',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  return res.ok;
 }
 
 export async function getProviderOffers(categoryId?: string): Promise<ProviderOffer[]> {

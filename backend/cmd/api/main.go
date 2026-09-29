@@ -42,10 +42,12 @@ func main() {
 	var userRepo *postgres.UserRepository
 	var oppRepo *postgres.OpportunityRepository
 	var logisticsRepo *postgres.LogisticsRepository
+	var catalogRepo *postgres.CatalogRepository
 	if db != nil {
 		userRepo = postgres.NewUserRepository(db)
 		oppRepo = postgres.NewOpportunityRepository(db)
 		logisticsRepo = postgres.NewLogisticsRepository(db)
+		catalogRepo = postgres.NewCatalogRepository(db)
 	}
 
 	// Initialize Workflow Plugin Engine
@@ -55,15 +57,22 @@ func main() {
 	var oppService *service.OpportunityService
 	var userService *service.UserService
 	var logisticsService *service.LogisticsService
+	var catalogService *service.CatalogService
 
 	if oppRepo != nil && userRepo != nil {
 		oppService = service.NewOpportunityService(oppRepo, userRepo, workflowRegistry)
+		if catalogRepo != nil {
+			oppService.SetCatalogRepository(catalogRepo)
+		}
 	}
 	if userRepo != nil {
 		userService = service.NewUserService(userRepo)
 	}
 	if logisticsRepo != nil && oppRepo != nil && userRepo != nil {
 		logisticsService = service.NewLogisticsService(logisticsRepo, oppRepo, userRepo)
+	}
+	if catalogRepo != nil && userRepo != nil {
+		catalogService = service.NewCatalogService(catalogRepo, userRepo)
 	}
 
 	// Initialize Handlers
@@ -72,6 +81,7 @@ func main() {
 	var catHandler *handler.CategoryHandler
 	var userMgmtHandler *handler.UserManagementHandler
 	var logisticsHandler *handler.LogisticsHandler
+	var catalogHandler *handler.CatalogHandler
 
 	if userRepo != nil {
 		authHandler = handler.NewAuthHandler(userRepo)
@@ -87,6 +97,9 @@ func main() {
 	}
 	if logisticsService != nil {
 		logisticsHandler = handler.NewLogisticsHandler(logisticsService)
+	}
+	if catalogService != nil && userRepo != nil {
+		catalogHandler = handler.NewCatalogHandler(catalogService, userRepo)
 	}
 	uploadHandler := handler.NewUploadHandler("./public/uploads")
 
@@ -272,6 +285,47 @@ func main() {
 				return
 			}
 			userMgmtHandler.AddUserService(w, r)
+		})
+
+		// Vendor Catalog Marketplace endpoints
+		r.Get("/catalog/search", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.SearchCatalog(w, r)
+		})
+
+		r.Get("/vendors/{vendor_id}/catalog", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.GetVendorCatalog(w, r)
+		})
+
+		r.Post("/vendor/catalog", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.CreateCatalogItem(w, r)
+		})
+
+		r.Put("/vendor/catalog/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.UpdateCatalogItem(w, r)
+		})
+
+		r.Delete("/vendor/catalog/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.DeleteCatalogItem(w, r)
 		})
 
 

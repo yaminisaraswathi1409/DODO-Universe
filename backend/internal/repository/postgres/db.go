@@ -257,6 +257,29 @@ func NewPostgresDB(ctx context.Context, databaseURL string) (*DB, error) {
 			created_at TIMESTAMPTZ DEFAULT NOW()
 		);`,
 		`CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications (user_id);`,
+		`CREATE TABLE IF NOT EXISTS vendor_catalog_items (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			vendor_asset_id UUID REFERENCES user_skills_assets(id) ON DELETE CASCADE,
+			vendor_user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			category_id UUID REFERENCES categories(id) ON DELETE SET NULL,
+			title VARCHAR(255) NOT NULL,
+			description TEXT,
+			sku VARCHAR(100),
+			unit_price NUMERIC(12, 2) NOT NULL DEFAULT 0,
+			price_unit VARCHAR(50) DEFAULT 'PER_PIECE',
+			stock_quantity INT DEFAULT 0,
+			min_order_quantity INT DEFAULT 1,
+			images JSONB DEFAULT '[]'::jsonb,
+			attributes JSONB DEFAULT '{}'::jsonb,
+			is_available BOOLEAN DEFAULT TRUE,
+			created_at TIMESTAMPTZ DEFAULT NOW(),
+			updated_at TIMESTAMPTZ DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_vendor_catalog_vendor_user ON vendor_catalog_items(vendor_user_id);`,
+		`CREATE INDEX IF NOT EXISTS idx_vendor_catalog_category ON vendor_catalog_items(category_id);`,
+		`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS target_vendor_id UUID REFERENCES users(id) ON DELETE SET NULL;`,
+		`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS catalog_item_id UUID REFERENCES vendor_catalog_items(id) ON DELETE SET NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_opportunities_target_vendor ON opportunities(target_vendor_id);`,
 	}
 
 

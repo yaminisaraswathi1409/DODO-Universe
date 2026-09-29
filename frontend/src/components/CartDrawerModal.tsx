@@ -29,10 +29,37 @@ export default function CartDrawerModal({
     cartCount,
   } = useCart();
 
+  // Lock background body scrolling ONLY when modal is open
+  React.useEffect(() => {
+    if (!isOpen) return;
+    const origOverflow = document.body.style.overflow;
+    const origDocOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = origOverflow;
+      document.documentElement.style.overflow = origDocOverflow;
+    };
+  }, [isOpen]);
+
+  // Handle browser popstate / back button inside CartDrawerModal
+  React.useEffect(() => {
+    if (!isOpen) return;
+
+    const handlePopState = () => {
+      onClose();
+    };
+
+    window.addEventListener('popstate', handlePopState);
+    return () => {
+      window.removeEventListener('popstate', handlePopState);
+    };
+  }, [isOpen, onClose]);
+
   if (!isOpen) return null;
 
   return (
-    <div className="fixed inset-0 z-50 overflow-hidden bg-black/75 backdrop-blur-sm animate-fadeIn">
+    <div className="fixed inset-0 z-[60] overflow-hidden bg-black/80 backdrop-blur-md animate-fadeIn touch-none">
       <div className="absolute inset-0" onClick={onClose} />
 
       <div className="fixed inset-y-0 right-0 max-w-full flex pl-10">
@@ -40,9 +67,14 @@ export default function CartDrawerModal({
           {/* Header */}
           <div className="p-5 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/60">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
-                <ShoppingBag className="w-5 h-5" />
-              </div>
+              <button
+                type="button"
+                onClick={onClose}
+                className="p-2 rounded-xl text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+                title="Back / Close Cart"
+              >
+                <ArrowLeft className="w-5 h-5 text-blue-400" />
+              </button>
               <div>
                 <h2 className="text-base font-extrabold text-white">Your Order Cart</h2>
                 <span className="text-xs text-slate-400 font-mono">
@@ -103,6 +135,23 @@ export default function CartDrawerModal({
                           {item.categoryName}
                         </span>
                         <h4 className="text-sm font-bold text-white mt-1">{item.title}</h4>
+                        {item.selectedOptionTitle && (
+                          <span className="text-[11px] text-emerald-400 font-semibold block mt-0.5">
+                            Option: {item.selectedOptionTitle}
+                          </span>
+                        )}
+                        {item.includedServices && item.includedServices.length > 0 && (
+                          <div className="flex items-center gap-1 flex-wrap mt-1">
+                            {item.includedServices.map((inc) => (
+                              <span
+                                key={inc}
+                                className="px-1.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[9px] font-extrabold uppercase border border-emerald-500/30"
+                              >
+                                {inc} INCLUDED
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <button
                         onClick={() => removeFromCart(item.id)}
@@ -122,7 +171,7 @@ export default function CartDrawerModal({
                               {k.replace(/_/g, ' ')}
                             </span>
                             <span className="text-slate-200 font-medium truncate block font-mono">
-                              {String(v)}
+                              {Array.isArray(v) ? v.join(', ') : typeof v === 'object' && v !== null ? JSON.stringify(v) : String(v)}
                             </span>
                           </div>
                         ))}

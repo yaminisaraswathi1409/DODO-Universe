@@ -182,17 +182,41 @@ type Category struct {
 	CreatedAt            time.Time       `json:"created_at"`
 }
 
+// VendorCatalogItem represents a product or service offered in a vendor's catalog (1 Vendor -> MANY items)
+type VendorCatalogItem struct {
+	ID               uuid.UUID       `json:"id"`
+	VendorAssetID    *uuid.UUID      `json:"vendor_asset_id,omitempty"`
+	VendorAsset      *UserSkillAsset `json:"vendor_asset,omitempty"`
+	VendorUserID     uuid.UUID       `json:"vendor_user_id"`
+	VendorUser       *User           `json:"vendor_user,omitempty"`
+	CategoryID       *uuid.UUID      `json:"category_id,omitempty"`
+	Category         *Category       `json:"category,omitempty"`
+	Title            string          `json:"title"`
+	Description      string          `json:"description,omitempty"`
+	SKU              string          `json:"sku,omitempty"`
+	UnitPrice        float64         `json:"unit_price"`
+	PriceUnit        string          `json:"price_unit"`
+	StockQuantity    int             `json:"stock_quantity"`
+	MinOrderQuantity int             `json:"min_order_quantity"`
+	Images           json.RawMessage `json:"images,omitempty"`
+	Attributes       json.RawMessage `json:"attributes,omitempty"`
+	IsAvailable      bool            `json:"is_available"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+}
+
 // Opportunity (Represents a Need or Offer)
 type Opportunity struct {
-	ID                  uuid.UUID         `json:"id"`
-	UserID              uuid.UUID         `json:"user_id"`
-	User                *User             `json:"user,omitempty"`
-	AssignedUserID      *uuid.UUID        `json:"assigned_user_id,omitempty"`
-	AssignedUser        *User             `json:"assigned_user,omitempty"`
-	TargetVendorID      *uuid.UUID        `json:"target_vendor_id,omitempty"`
-	TargetVendor        *User             `json:"target_vendor,omitempty"`
-	CatalogItemID       *uuid.UUID        `json:"catalog_item_id,omitempty"`
-	CategoryID          *uuid.UUID        `json:"category_id,omitempty"`
+	ID                  uuid.UUID          `json:"id"`
+	UserID              uuid.UUID          `json:"user_id"`
+	User                *User              `json:"user,omitempty"`
+	AssignedUserID      *uuid.UUID         `json:"assigned_user_id,omitempty"`
+	AssignedUser        *User              `json:"assigned_user,omitempty"`
+	TargetVendorID      *uuid.UUID         `json:"target_vendor_id,omitempty"`
+	TargetVendor        *User              `json:"target_vendor,omitempty"`
+	CatalogItemID       *uuid.UUID         `json:"catalog_item_id,omitempty"`
+	CatalogItem         *VendorCatalogItem `json:"catalog_item,omitempty"`
+	CategoryID          *uuid.UUID         `json:"category_id,omitempty"`
 	Category            *Category         `json:"category,omitempty"`
 	Type                OpportunityType   `json:"type"`
 	OrderMode           OrderMode         `json:"order_mode"`
