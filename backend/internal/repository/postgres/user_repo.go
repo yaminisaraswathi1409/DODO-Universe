@@ -335,8 +335,8 @@ func (r *UserRepository) SignupUser(ctx context.Context, fullName, phone, email 
 
 	query := `
 		INSERT INTO users (supabase_uid, phone, full_name, email, status, role, mobile_verified)
-		VALUES ($1, $2, $3, $4, 'PENDING', 'USER', FALSE)
-		ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name, email = EXCLUDED.email, updated_at = NOW()
+		VALUES ($1, $2, $3, NULLIF($4, ''), 'PENDING', 'USER', FALSE)
+		ON CONFLICT (phone) DO UPDATE SET full_name = EXCLUDED.full_name, email = NULLIF(EXCLUDED.email, ''), updated_at = NOW()
 		RETURNING id, supabase_uid, COALESCE(email, ''), COALESCE(phone, ''), full_name, COALESCE(avatar_url, ''), COALESCE(bio, ''), 
 		          COALESCE(ST_Y(location::geometry), 0.0) as lat, COALESCE(ST_X(location::geometry), 0.0) as lng, COALESCE(address_text, ''), COALESCE(aadhaar_number, ''), trust_score, is_verified,
 		          status, role, mobile_verified, COALESCE(otp_code, ''), otp_expires_at, face_verified, face_verified_at, COALESCE(face_verification_ref, ''),
@@ -516,6 +516,29 @@ func (r *UserRepository) AddUserSkillAsset(ctx context.Context, userID uuid.UUID
 	return r.scanUserSkillAssetRow(row)
 }
 
+func (r *UserRepository) AddUserSkillAssetWithAttributes(ctx context.Context, userID uuid.UUID, categoryID *uuid.UUID, assetType, title, description string, hourlyRate, dailyRate *float64, lat, lng float64, attributesJSON string, autoApprove bool) (*domain.UserSkillAsset, error) {
+	status := "PENDING_APPROVAL"
+	isAvail := false
+	if autoApprove {
+		status = "ACTIVE"
+		isAvail = true
+	}
+	if attributesJSON == "" {
+		attributesJSON = "{}"
+	}
+
+	query := `
+		INSERT INTO user_skills_assets (user_id, category_id, asset_type, title, description, hourly_rate, daily_rate, current_location, attributes, status, is_available)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, ST_SetSRID(ST_MakePoint($9, $8), 4326), $10::jsonb, $11, $12)
+		RETURNING id, user_id, category_id, asset_type, title, COALESCE(description, ''), hourly_rate, daily_rate, is_available,
+		          COALESCE(status, 'PENDING_APPROVAL'), COALESCE(rejection_reason, ''), COALESCE(documents, '{}'::jsonb),
+		          COALESCE(ST_Y(current_location::geometry), 0.0) as lat, COALESCE(ST_X(current_location::geometry), 0.0) as lng,
+		          COALESCE(attributes, '{}'::jsonb), created_at, updated_at;
+	`
+	row := r.db.Pool.QueryRow(ctx, query, userID, categoryID, assetType, title, description, hourlyRate, dailyRate, lat, lng, attributesJSON, status, isAvail)
+	return r.scanUserSkillAssetRow(row)
+}
+
 func (r *UserRepository) SubmitSkillAssetDocuments(ctx context.Context, assetID, userID uuid.UUID, documentsJSON string) (*domain.UserSkillAsset, error) {
 	query := `
 		UPDATE user_skills_assets
@@ -558,9 +581,49 @@ func (r *UserRepository) GetUserSkillsAssets(ctx context.Context, userID uuid.UU
 		}
 
 		if asset.CategoryID != nil {
-			catQuery := `SELECT id, slug, name, COALESCE(description, ''), COALESCE(icon, ''), default_workflow, COALESCE(required_documents, '[]'::jsonb) FROM categories WHERE id = $1;`
+			catQuery := `SELECT id, slug, name, COALESCE(description, ''), COALESCE(icon, ''), default_workflow, COALESCE(required_documents, '[]'::jsonb), COALESCE(opportunity_fields, '[]'::jsonb), COALESCE(resources, '[]'::jsonb) FROM categories WHERE id = $1;`
 			var c domain.Category
-			if err := r.db.Pool.QueryRow(ctx, catQuery, *asset.CategoryID).Scan(&c.ID, &c.Slug, &c.Name, &c.Description, &c.Icon, &c.DefaultWorkflow, &c.RequiredDocuments); err == nil {
+			if err := r.db.Pool.QueryRow(ctx, catQuery, *asset.CategoryID).Scan(&c.ID, &c.Slug, &c.Name, &c.Description, &c.Icon, &c.DefaultWorkflow, &c.RequiredDocuments, &c.OpportunityFields, &c.Resources); err == nil {
+				asset.Category = &c
+			}
+		}
+
+		list = append(list, asset)
+	}
+	return list, nil
+}
+
+// GetActiveUserSkillsAssets queries ONLY ACTIVE and available provider services for public customer storefronts
+func (r *UserRepository) GetActiveUserSkillsAssets(ctx context.Context, userID uuid.UUID) ([]*domain.UserSkillAsset, error) {
+	query := `
+		SELECT sa.id, sa.user_id, sa.category_id, sa.asset_type, sa.title, COALESCE(sa.description, ''),
+		       sa.hourly_rate, sa.daily_rate, sa.is_available, COALESCE(sa.status, 'PENDING_APPROVAL'),
+		       COALESCE(sa.rejection_reason, ''), COALESCE(sa.documents, '{}'::jsonb),
+		       COALESCE(ST_Y(sa.current_location::geometry), 0.0) as lat, COALESCE(ST_X(sa.current_location::geometry), 0.0) as lng,
+		       COALESCE(sa.attributes, '{}'::jsonb), sa.created_at, sa.updated_at
+		FROM user_skills_assets sa
+		WHERE sa.user_id = $1
+		  AND sa.status = 'ACTIVE'
+		  AND sa.is_available = TRUE
+		ORDER BY sa.created_at DESC;
+	`
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var list []*domain.UserSkillAsset
+	for rows.Next() {
+		asset, err := r.scanUserSkillAssetRow(rows)
+		if err != nil {
+			return nil, err
+		}
+
+		if asset.CategoryID != nil {
+			catQuery := `SELECT id, slug, name, COALESCE(description, ''), COALESCE(icon, ''), default_workflow, COALESCE(required_documents, '[]'::jsonb), COALESCE(opportunity_fields, '[]'::jsonb), COALESCE(resources, '[]'::jsonb) FROM categories WHERE id = $1;`
+			var c domain.Category
+			if err := r.db.Pool.QueryRow(ctx, catQuery, *asset.CategoryID).Scan(&c.ID, &c.Slug, &c.Name, &c.Description, &c.Icon, &c.DefaultWorkflow, &c.RequiredDocuments, &c.OpportunityFields, &c.Resources); err == nil {
 				asset.Category = &c
 			}
 		}
@@ -869,6 +932,66 @@ func (r *UserRepository) clearUserDefaultAddress(ctx context.Context, userID uui
 	_, err := r.db.Pool.Exec(ctx, query, userID)
 	return err
 }
+
+func (r *UserRepository) CreateNotification(ctx context.Context, notif *domain.Notification) (*domain.Notification, error) {
+	query := `
+		INSERT INTO notifications (user_id, title, message, type, metadata)
+		VALUES ($1, $2, $3, COALESCE(NULLIF($4, ''), 'INFO'), COALESCE($5, '{}'::jsonb))
+		RETURNING id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at;
+	`
+	row := r.db.Pool.QueryRow(ctx, query, notif.UserID, notif.Title, notif.Message, notif.Type, notif.Metadata)
+	var res domain.Notification
+	err := row.Scan(&res.ID, &res.UserID, &res.Title, &res.Message, &res.Type, &res.Metadata, &res.IsRead, &res.CreatedAt)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create notification: %w", err)
+	}
+	return &res, nil
+}
+
+func (r *UserRepository) GetUserNotifications(ctx context.Context, userID uuid.UUID) ([]*domain.Notification, error) {
+	query := `
+		SELECT id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at
+		FROM notifications
+		WHERE user_id = $1
+		ORDER BY created_at DESC
+		LIMIT 50;
+	`
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*domain.Notification
+	for rows.Next() {
+		var n domain.Notification
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Title, &n.Message, &n.Type, &n.Metadata, &n.IsRead, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &n)
+	}
+	return list, nil
+}
+
+func (r *UserRepository) MarkNotificationAsRead(ctx context.Context, notifID, userID uuid.UUID) error {
+	query := `UPDATE notifications SET is_read = TRUE WHERE id = $1 AND user_id = $2;`
+	_, err := r.db.Pool.Exec(ctx, query, notifID, userID)
+	return err
+}
+
+func (r *UserRepository) MarkAllNotificationsAsRead(ctx context.Context, userID uuid.UUID) error {
+	query := `UPDATE notifications SET is_read = TRUE WHERE user_id = $1 AND is_read = FALSE;`
+	_, err := r.db.Pool.Exec(ctx, query, userID)
+	return err
+}
+
+func (r *UserRepository) GetUnreadNotificationCount(ctx context.Context, userID uuid.UUID) (int, error) {
+	query := `SELECT COUNT(*) FROM notifications WHERE user_id = $1 AND is_read = FALSE;`
+	var count int
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(&count)
+	return count, err
+}
+
 
 
 

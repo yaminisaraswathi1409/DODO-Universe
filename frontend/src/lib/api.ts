@@ -803,6 +803,36 @@ export async function deleteUserAddress(userId: string, addressId: string): Prom
   return true;
 }
 
+export interface CategoryRelatedServiceSpec {
+  category_id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  is_required?: boolean;
+}
+
+export async function updateCategoryRelatedServices(
+  categoryId: string,
+  relatedServices: CategoryRelatedServiceSpec[]
+): Promise<Category> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${categoryId}/related-services`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ related_services: relatedServices }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.message || 'Failed to update category related services');
+  }
+  const data = await res.json();
+  return data.data;
+}
+
+
 
 
 

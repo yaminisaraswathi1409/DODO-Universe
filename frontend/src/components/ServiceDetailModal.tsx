@@ -2,7 +2,9 @@
 
 import React, { useState, useEffect } from 'react';
 import { Category, Opportunity, OpportunityFieldSpec } from '@/lib/api';
+import { getServiceActionLabel } from '@/lib/categoryHierarchy';
 import { useCart } from '@/context/CartContext';
+
 import { X, Layers, ShoppingBag, CheckCircle, AlertCircle, Plus, Minus, Tag, MapPin, Calendar, Clock } from 'lucide-react';
 
 interface ServiceDetailModalProps {
@@ -20,14 +22,15 @@ export default function ServiceDetailModal({
 }: ServiceDetailModalProps) {
   const { addToCart } = useCart();
   const [dynamicFormValues, setDynamicFormValues] = useState<Record<string, any>>({});
-  const [quantity, setQuantity] = useState<number>(1);
+  const [quantity, setQuantity] = useState<number>(300);
   const [error, setError] = useState<string>('');
   const [addedSuccess, setAddedSuccess] = useState<boolean>(false);
 
   useEffect(() => {
     if (isOpen && category) {
       setDynamicFormValues({});
-      setQuantity(1);
+      const initialQty = category.slug?.includes('brick') ? 300 : 1;
+      setQuantity(initialQty);
       setError('');
       setAddedSuccess(false);
 
@@ -46,9 +49,25 @@ export default function ServiceDetailModal({
     }
   }, [isOpen, category, opportunity]);
 
+  // Lock background body scrolling ONLY when modal is open
+  useEffect(() => {
+    if (!isOpen) return;
+    const origOverflow = document.body.style.overflow;
+    const origDocOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = origOverflow;
+      document.documentElement.style.overflow = origDocOverflow;
+    };
+  }, [isOpen]);
+
   if (!isOpen || !category) return null;
 
-  const fields: OpportunityFieldSpec[] = category.opportunity_fields || [];
+  const fields: OpportunityFieldSpec[] = (category.opportunity_fields || []).filter(
+    (f) => f.key !== 'quantity' && f.key !== 'quantity_needed' && f.key !== 'quantity_bags' && f.key !== 'delivery_access' && f.label !== 'Site Access Type'
+  );
+
 
   const handleFieldChange = (key: string, val: any) => {
     setDynamicFormValues((prev) => ({
@@ -103,10 +122,10 @@ export default function ServiceDetailModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/75 backdrop-blur-sm animate-fadeIn">
-      <div className="bg-[#0c1220] border border-slate-800 rounded-3xl w-full max-w-xl overflow-hidden shadow-2xl space-y-0">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-2 sm:p-4 overflow-hidden">
+      <div className="relative w-full max-w-xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-[#0c1220] border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
         {/* Header */}
-        <div className="p-6 border-b border-slate-800/80 flex items-center justify-between bg-slate-900/50">
+        <div className="p-5 sm:p-6 border-b border-slate-800/80 flex-none relative bg-[#0c1220]/95 backdrop-blur-sm flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-10 h-10 rounded-xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center text-blue-400">
               <Layers className="w-5 h-5" />
@@ -129,7 +148,7 @@ export default function ServiceDetailModal({
         </div>
 
         {/* Form Body */}
-        <form onSubmit={handleAddToCartSubmit} className="p-6 space-y-6 max-h-[75vh] overflow-y-auto">
+        <form onSubmit={handleAddToCartSubmit} className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-5 sm:p-6 space-y-6 touch-pan-y overscroll-contain">
           {/* Description Card */}
           <div className="p-4 rounded-2xl bg-slate-900/60 border border-slate-800 text-xs text-slate-300">
             <p>{opportunity?.description || category.description}</p>
@@ -245,8 +264,9 @@ export default function ServiceDetailModal({
             className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-blue-600 via-indigo-600 to-purple-600 hover:opacity-95 text-white font-bold text-xs uppercase tracking-wider transition-all shadow-xl shadow-blue-600/25 flex items-center justify-center gap-2"
           >
             <ShoppingBag className="w-4 h-4" />
-            <span>Add Item to Order Cart</span>
+            <span>{getServiceActionLabel(category)} — Add to Cart</span>
           </button>
+
         </form>
       </div>
     </div>

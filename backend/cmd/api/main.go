@@ -218,6 +218,38 @@ func main() {
 			catHandler.UpdateOpportunityFields(w, r)
 		})
 
+		r.Post("/admin/categories/{id}/vehicle-fields", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateVehicleFields(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/driver-fields", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateDriverFields(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/related-services", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateRelatedServices(w, r)
+		})
+
+		r.Put("/admin/categories/{id}/related-services", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateRelatedServices(w, r)
+		})
+
 		r.Post("/users/status", func(w http.ResponseWriter, r *http.Request) {
 			if userMgmtHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -225,6 +257,23 @@ func main() {
 			}
 			userMgmtHandler.UpdateStatus(w, r)
 		})
+
+		r.Post("/users/services", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AddUserService(w, r)
+		})
+
+		r.Post("/users/skills-assets", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AddUserService(w, r)
+		})
+
 
 
 		r.Get("/opportunities/public", func(w http.ResponseWriter, r *http.Request) {

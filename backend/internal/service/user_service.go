@@ -129,6 +129,10 @@ func (s *UserService) AddUserSkillAsset(ctx context.Context, userID uuid.UUID, c
 	return s.userRepo.AddUserSkillAsset(ctx, userID, categoryID, assetType, title, description, hourlyRate, dailyRate)
 }
 
+func (s *UserService) AddUserSkillAssetWithAttributes(ctx context.Context, userID uuid.UUID, categoryID *uuid.UUID, assetType, title, description string, hourlyRate, dailyRate *float64, lat, lng float64, attributesJSON string, autoApprove bool) (*domain.UserSkillAsset, error) {
+	return s.userRepo.AddUserSkillAssetWithAttributes(ctx, userID, categoryID, assetType, title, description, hourlyRate, dailyRate, lat, lng, attributesJSON, autoApprove)
+}
+
 func (s *UserService) SubmitSkillAssetDocuments(ctx context.Context, assetID, userID uuid.UUID, documentsJSON string) (*domain.UserSkillAsset, error) {
 	return s.userRepo.SubmitSkillAssetDocuments(ctx, assetID, userID, documentsJSON)
 }

@@ -159,16 +159,57 @@ type UserSkillAsset struct {
 
 // Category definition
 type Category struct {
-	ID                uuid.UUID       `json:"id"`
-	Slug              string          `json:"slug"`
-	Name              string          `json:"name"`
-	Description       string          `json:"description,omitempty"`
-	Icon              string          `json:"icon,omitempty"`
-	DefaultWorkflow   WorkflowModel   `json:"default_workflow"`
-	RequiredDocuments json.RawMessage `json:"required_documents,omitempty"`
-	OpportunityFields json.RawMessage `json:"opportunity_fields,omitempty"`
-	CreatedAt         time.Time       `json:"created_at"`
+	ID                uuid.UUID             `json:"id"`
+	Slug              string                `json:"slug"`
+	Name              string                `json:"name"`
+	Description       string                `json:"description,omitempty"`
+	Icon              string                `json:"icon,omitempty"`
+	DefaultWorkflow   WorkflowModel         `json:"default_workflow"`
+	RequiredDocuments json.RawMessage       `json:"required_documents,omitempty"`
+	OpportunityFields json.RawMessage       `json:"opportunity_fields,omitempty"`
+	VehicleFields     json.RawMessage       `json:"vehicle_fields,omitempty"`
+	DriverFields      json.RawMessage       `json:"driver_fields,omitempty"`
+	RelatedServices   json.RawMessage       `json:"related_services,omitempty"`
+	Resources         []ResourceRequirement `json:"resources,omitempty"`
+	CreatedAt         time.Time             `json:"created_at"`
 }
+
+// Notification represents a user notification
+type Notification struct {
+	ID        uuid.UUID       `json:"id"`
+	UserID    uuid.UUID       `json:"user_id"`
+	Title     string          `json:"title"`
+	Message   string          `json:"message"`
+	Type      string          `json:"type"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	IsRead    bool            `json:"is_read"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// ResourceRequirement represents dynamic resource requirements attached to a category
+type ResourceRequirement struct {
+	ID          uuid.UUID       `json:"id"`
+	CategoryID  uuid.UUID       `json:"category_id"`
+	Type        string          `json:"type"` // e.g., 'DRIVER', 'VEHICLE', 'EQUIPMENT', 'HEAVY_MACHINERY', 'LABOUR'
+	Label       string          `json:"label"`
+	IsRequired  bool            `json:"is_required"`
+	Description string          `json:"description,omitempty"`
+	Options     json.RawMessage `json:"options,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
+
+
+// DynamicResource represents assigned dynamic resources for an asset or opportunity
+type DynamicResource struct {
+	ID            uuid.UUID       `json:"id"`
+	RequirementID uuid.UUID       `json:"requirement_id"`
+	AssetID       *uuid.UUID      `json:"asset_id,omitempty"`
+	OpportunityID *uuid.UUID      `json:"opportunity_id,omitempty"`
+	ResourceType  string          `json:"resource_type"`
+	Details       json.RawMessage `json:"details"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
 
 
 // Opportunity (Represents a Need or Offer)

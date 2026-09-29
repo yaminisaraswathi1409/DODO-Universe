@@ -13,12 +13,11 @@ ON CONFLICT (slug) DO NOTHING;
 -- 2. Seed Dynamic Opportunity Fields JSONB for Bricks
 UPDATE categories
 SET opportunity_fields = '[
-  {"key": "quantity", "label": "Quantity (Number of Bricks)", "type": "number", "required": true, "placeholder": "e.g. 5000"},
   {"key": "brick_type", "label": "Brick Type", "type": "select", "required": true, "options": ["Red Clay Bricks", "Fly Ash Bricks", "AAC Blocks", "Concrete Blocks"]},
-  {"key": "grade_spec", "label": "Specification / Grade", "type": "select", "required": true, "options": ["Class A (High Strength)", "Class B (Standard)", "Heavy Duty Structural"]},
-  {"key": "delivery_access", "label": "Site Access Type", "type": "select", "required": false, "options": ["10-Wheeler Truck Accessible", "Tractor Access Only", "Narrow Street / Manual Unload"]}
+  {"key": "grade_spec", "label": "Specification / Grade", "type": "select", "required": true, "options": ["Class A (High Strength)", "Class B (Standard)", "Heavy Duty Structural"]}
 ]'::jsonb
 WHERE slug = 'bricks-building-materials';
+
 
 -- 3. Seed Dynamic Opportunity Fields JSONB for Cement
 UPDATE categories
