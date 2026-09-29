@@ -2,12 +2,13 @@
 
 import React, { useState, useEffect } from 'react';
 import { Category, createOpportunity, getCategories, Opportunity, OpportunityFieldSpec, uploadFile, getUserAddresses } from '@/lib/api';
-import { X, HelpCircle, Handshake, MapPin, Tag, Calendar, DollarSign, Package, Send, CheckCircle, Upload, FileText, RefreshCw } from 'lucide-react';
+import { X, HelpCircle, Handshake, MapPin, Tag, Calendar, DollarSign, Package, Send, CheckCircle, Upload, FileText, RefreshCw, Truck, Edit2, ArrowLeft } from 'lucide-react';
 
 interface CreateOpportunityModalProps {
   isOpen: boolean;
   onClose: () => void;
   defaultType?: 'NEED' | 'OFFER';
+  initialCategoryId?: string;
   onCreated?: (opp: Opportunity) => void;
 }
 
@@ -15,34 +16,66 @@ export default function CreateOpportunityModal({
   isOpen,
   onClose,
   defaultType = 'NEED',
+  initialCategoryId,
   onCreated,
 }: CreateOpportunityModalProps) {
   const [type, setType] = useState<'NEED' | 'OFFER'>(defaultType);
+  const [step, setStep] = useState<'FORM' | 'REVIEW'>('FORM');
   const [categories, setCategories] = useState<Category[]>([]);
-  const [selectedCategoryId, setSelectedCategoryId] = useState('');
-  
-  // Standard fields
-  const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
+  const [selectedCategoryId, setSelectedCategoryId] = useState(initialCategoryId || '');
+
+  // Requirement form fields
+  const [quantity, setQuantity] = useState('350');
+  const [unit, setUnit] = useState('Pieces');
   const [addressText, setAddressText] = useState('Choutuppal, Telangana');
   const [lat, setLat] = useState(17.25);
   const [lng, setLng] = useState(78.95);
-  const [destination, setDestination] = useState('');
   const [scheduledStart, setScheduledStart] = useState('');
+  const [description, setDescription] = useState('');
   const [budgetMax, setBudgetMax] = useState('');
   const [priceUnit, setPriceUnit] = useState('FIXED');
+
+  // Commute Offer Route Fields State
+  const [originAddr, setOriginAddr] = useState('Lingotam, Telangana');
+  const [destAddr, setDestAddr] = useState('Choutuppal, Telangana');
+  const [travelFreq, setTravelFreq] = useState('DAILY');
+  const [travelMode, setTravelMode] = useState('BIKE');
+  const [travelTime, setTravelTime] = useState('08:00 AM - 09:00 AM');
 
   // DB-Driven Dynamic Custom Fields State
   const [customValues, setCustomValues] = useState<Record<string, any>>({});
   const [uploadingFields, setUploadingFields] = useState<Record<string, boolean>>({});
+
+  // Transport Arrangement Choice State
+  const [transportOption, setTransportOption] = useState<'NEED_TRANSPORT' | 'OWN_VEHICLE' | 'ARRANGE_MYSELF'>('NEED_TRANSPORT');
 
   const [loading, setLoading] = useState(false);
   const [error, setError] = useState('');
   const [success, setSuccess] = useState(false);
 
   useEffect(() => {
+    if (initialCategoryId) {
+      setSelectedCategoryId(initialCategoryId);
+    }
+  }, [initialCategoryId]);
+
+  useEffect(() => {
     setType(defaultType);
-  }, [defaultType]);
+    setStep('FORM');
+  }, [defaultType, isOpen]);
+
+  // Lock background body scrolling ONLY when modal is open
+  useEffect(() => {
+    if (!isOpen) return;
+    const origOverflow = document.body.style.overflow;
+    const origDocOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
+    return () => {
+      document.body.style.overflow = origOverflow;
+      document.documentElement.style.overflow = origDocOverflow;
+    };
+  }, [isOpen]);
 
   useEffect(() => {
     async function loadCatsAndAddress() {
@@ -82,9 +115,26 @@ export default function CreateOpportunityModal({
     }
   }, [isOpen]);
 
-
   const selectedCategory = categories.find((c) => c.id === selectedCategoryId || c.slug === selectedCategoryId);
-  const dynamicFields: OpportunityFieldSpec[] = selectedCategory?.opportunity_fields || [];
+
+  // Auto-set default unit based on category
+  useEffect(() => {
+    if (selectedCategory) {
+      const slug = (selectedCategory.slug || '').toLowerCase();
+      if (slug.includes('brick')) setUnit('Pieces');
+      else if (slug.includes('cement')) setUnit('Bags');
+      else if (slug.includes('labour') || slug.includes('driver')) setUnit('Days');
+      else if (slug.includes('transport') || slug.includes('vehicle')) setUnit('Trips');
+      else setUnit('Pieces');
+    }
+  }, [selectedCategory]);
+
+  const dynamicFields: OpportunityFieldSpec[] = (selectedCategory?.opportunity_fields || []).filter(
+    (f) => f.key !== 'quantity' && f.key !== 'delivery_access' && f.label !== 'Site Access Type'
+  );
+  const activeResources = (selectedCategory?.resources || []).filter(
+    (r: any) => r.active && r.requirement_level !== 'NOT_APPLICABLE'
+  );
 
   if (!isOpen) return null;
 
@@ -104,20 +154,33 @@ export default function CreateOpportunityModal({
     }
   };
 
-  const handleSubmit = async (e: React.FormEvent) => {
+  const handleContinueToReview = (e: React.FormEvent) => {
     e.preventDefault();
+    setError('');
 
-    const quantityVal = customValues['quantity'] || customValues['quantity_bags'] || customValues['cargo_weight_tons'] || customValues['farm_area_acres'];
-    const finalTitle = `${selectedCategory?.name || 'Service'} ${type === 'NEED' ? 'Requirement' : 'Offer'}${quantityVal ? ' (' + quantityVal + ' Units)' : ''}`;
-    const finalDesc = `${selectedCategory?.name || 'Service'} ${type === 'NEED' ? 'Need' : 'Offer'} request at ${addressText || 'location'}`;
-
-    // Validate required dynamic fields
-    for (const field of dynamicFields) {
-      if (field.required && (!customValues[field.key] || customValues[field.key].toString().trim() === '')) {
-        setError(`Please fill in required field: ${field.label}`);
+    if (type === 'NEED') {
+      if (!quantity || parseFloat(quantity) <= 0) {
+        setError('Please enter a valid quantity.');
         return;
       }
+      if (!addressText.trim()) {
+        setError('Please select or enter a delivery/service location.');
+        return;
+      }
+      for (const field of dynamicFields) {
+        if (field.required && (!customValues[field.key] || customValues[field.key].toString().trim() === '')) {
+          setError(`Please fill in required field: ${field.label}`);
+          return;
+        }
+      }
     }
+
+    setStep('REVIEW');
+  };
+
+  const handleSubmit = async () => {
+    const finalTitle = `${selectedCategory?.name || 'Service'} ${type === 'NEED' ? 'Requirement' : 'Offer'}${quantity ? ' (' + quantity + ' ' + unit + ')' : ''}`;
+    const finalDesc = description || `${selectedCategory?.name || 'Service'} ${type === 'NEED' ? 'Need' : 'Offer'} request at ${addressText || 'location'}`;
 
     setLoading(true);
     setError('');
@@ -129,32 +192,39 @@ export default function CreateOpportunityModal({
         if (u) storedUser = JSON.parse(u);
       }
 
-      const quantityVal = customValues['quantity'] || customValues['quantity_needed'] || customValues['quantity_bags'] || customValues['cargo_weight_tons'] || customValues['farm_area_acres'] || customValues['capacity'] || customValues['units'];
-      const pickupVal = customValues['pickup_location'] || addressText;
-      const destVal = customValues['destination_location'] || destination;
-      const dateVal = customValues['required_date'] || scheduledStart;
-      const budgetVal = customValues['budget_amount'] || budgetMax;
-
       const payload: Partial<Opportunity> & { user_id?: string; metadata?: Record<string, any> } = {
         type,
         category_id: selectedCategory?.id || selectedCategoryId || undefined,
-        title: finalTitle,
-        description: finalDesc,
+        title: type === 'OFFER' ? `Commute Route Offer: ${originAddr} ↔ ${destAddr}` : finalTitle,
+        description: type === 'OFFER' ? `Daily commuter route travel between ${originAddr} and ${destAddr} (${travelMode})` : finalDesc,
         workflow_model: type === 'NEED' ? 'MULTI_LAYER' : 'INSTANT',
-        address_text: pickupVal || 'Choutuppal, Telangana',
+        address_text: type === 'OFFER' ? originAddr : (addressText || 'Choutuppal, Telangana'),
         lat: lat || 17.25,
         lng: lng || 78.95,
         radius_km: 25,
-        budget_max: budgetVal ? parseFloat(budgetVal) : undefined,
+        budget_max: budgetMax ? parseFloat(budgetMax) : undefined,
         price_unit: priceUnit,
-        scheduled_start: dateVal ? new Date(dateVal).toISOString() : undefined,
+        scheduled_start: scheduledStart ? new Date(scheduledStart).toISOString() : undefined,
         user_id: storedUser?.id || undefined,
         metadata: {
-          custom_fields: customValues,
+          custom_fields: { ...customValues, quantity, unit },
           category_slug: selectedCategory?.slug,
           category_name: selectedCategory?.name,
-          quantity: quantityVal ? parseInt(quantityVal, 10) || quantityVal : undefined,
-          destination: destVal ? destVal.trim() : undefined,
+          quantity: parseFloat(quantity) || 1,
+          unit: unit,
+          transport_option: transportOption,
+          transport_charge: transportOption === 'NEED_TRANSPORT' ? 2500 : 0,
+          destination: destAddr ? destAddr.trim() : undefined,
+          origin_address: originAddr,
+          origin_lat: 17.22,
+          origin_lng: 78.90,
+          destination_address: destAddr,
+          destination_lat: 17.25,
+          destination_lng: 78.95,
+          travel_frequency: travelFreq,
+          travel_mode: travelMode,
+          travel_time: travelTime,
+          is_active: true,
           ...customValues,
         },
       };
@@ -164,72 +234,58 @@ export default function CreateOpportunityModal({
         setSuccess(true);
         setTimeout(() => {
           setSuccess(false);
+          setStep('FORM');
           if (onCreated) onCreated(created);
           onClose();
         }, 1200);
       }
     } catch (err: any) {
-      setError(err.message || 'Failed to create opportunity. Please check details.');
+      let errMsg = err?.message || 'Failed to create opportunity. Please check details.';
+      if (typeof errMsg === 'string' && errMsg.startsWith('{')) {
+        try {
+          const parsed = JSON.parse(errMsg);
+          errMsg = parsed.error || parsed.message || errMsg;
+        } catch {
+          // ignore
+        }
+      }
+      setError(errMsg);
     } finally {
       setLoading(false);
     }
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
-      <div className="relative w-full max-w-2xl bg-[#0d1322] border border-slate-800 rounded-3xl p-6 sm:p-8 shadow-2xl my-8">
-        <button
-          onClick={onClose}
-          className="absolute top-6 right-6 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
-        >
-          <X className="w-5 h-5" />
-        </button>
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-2 sm:p-4 overflow-hidden">
+      <div className="relative w-full max-w-2xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-[#0d1322] border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+        
+        {/* Modal Fixed Header */}
+        <div className="p-5 sm:p-6 border-b border-slate-800/80 flex-none relative bg-[#0d1322]/95 backdrop-blur-sm">
+          <button
+            onClick={onClose}
+            className="absolute top-5 right-5 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors z-10"
+            aria-label="Close modal"
+          >
+            <X className="w-5 h-5" />
+          </button>
 
-        {/* Modal Header */}
-        <div className="mb-6">
-          <div className="flex items-center gap-2 mb-2">
-            <span className={`px-3 py-1 rounded-full text-xs font-bold uppercase tracking-wider ${
-              type === 'NEED' ? 'bg-blue-500/20 text-blue-400 border border-blue-500/30' : 'bg-emerald-500/20 text-emerald-400 border border-emerald-500/30'
-            }`}>
-              {type === 'NEED' ? 'I Need Help' : 'I Can Offer'}
-            </span>
-          </div>
-          <h2 className="text-2xl sm:text-3xl font-extrabold text-white">
-            {type === 'NEED' ? 'Create a Real Need' : 'Create a Real Offer'}
+          <h2 className="text-xl sm:text-2xl font-extrabold text-white uppercase tracking-tight">
+            {step === 'REVIEW'
+              ? 'YOUR REQUEST'
+              : `REQUEST ${selectedCategory?.name || 'SERVICE'}`}
           </h2>
-          <p className="text-slate-400 text-sm mt-1">
-            {type === 'NEED' 
-              ? 'Post your dynamic requirement to connect with real providers.' 
-              : 'Post your availability, fleet, goods, or services.'}
+          <p className="text-slate-400 text-xs mt-1">
+            {step === 'REVIEW'
+              ? 'Review your requirement details before submitting.'
+              : 'Enter your requirement details below.'}
           </p>
         </div>
 
-        {/* Type Switcher Tabs */}
-        <div className="grid grid-cols-2 gap-2 p-1.5 bg-slate-900/80 rounded-2xl border border-slate-800 mb-6">
-          <button
-            type="button"
-            onClick={() => setType('NEED')}
-            className={`py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${
-              type === 'NEED' ? 'bg-blue-600 text-white shadow-lg shadow-blue-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <HelpCircle className="w-4 h-4" />
-            <span>I Need Help</span>
-          </button>
-          <button
-            type="button"
-            onClick={() => setType('OFFER')}
-            className={`py-2.5 rounded-xl font-bold text-sm flex items-center justify-center gap-2 transition-all ${
-              type === 'OFFER' ? 'bg-emerald-600 text-white shadow-lg shadow-emerald-600/30' : 'text-slate-400 hover:text-white'
-            }`}
-          >
-            <Handshake className="w-4 h-4" />
-            <span>I Can Offer</span>
-          </button>
-        </div>
+        {/* Modal Scrollable Body */}
+        <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-5 sm:p-6 space-y-6">
 
         {error && (
-          <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-sm">
+          <div className="p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-sm">
             {error}
           </div>
         )}
@@ -237,45 +293,106 @@ export default function CreateOpportunityModal({
         {success ? (
           <div className="py-12 text-center space-y-4">
             <CheckCircle className="w-16 h-16 text-emerald-400 mx-auto animate-bounce" />
-            <h3 className="text-2xl font-bold text-white">Opportunity Created Successfully!</h3>
-            <p className="text-slate-400 text-sm">Published to the live PostgreSQL marketplace feed.</p>
+            <h3 className="text-2xl font-bold text-white">Request Submitted Successfully!</h3>
+            <p className="text-slate-400 text-sm">Matching eligible local providers for your request...</p>
           </div>
-        ) : (
-          <form onSubmit={handleSubmit} className="space-y-4">
-            {/* Category Select */}
-            <div>
-              <label className="block text-xs font-semibold uppercase text-slate-400 mb-1 flex items-center gap-1.5">
-                <Tag className="w-3.5 h-3.5 text-blue-400" />
-                <span>Select Service Category *</span>
-              </label>
-              <select
-                value={selectedCategoryId}
-                onChange={(e) => setSelectedCategoryId(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-200 text-sm focus:outline-none focus:border-blue-500 font-semibold"
-              >
-                {categories.map((cat) => (
-                  <option key={cat.id} value={cat.id}>
-                    {cat.name} ({cat.slug})
-                  </option>
-                ))}
-              </select>
+        ) : step === 'FORM' ? (
+          /* ========================================================================= */
+          /* STEP 2 — REQUIREMENT FORM */
+          /* ========================================================================= */
+          <form id="create-opportunity-form" onSubmit={handleContinueToReview} className="space-y-5">
+            {/* Quantity and Unit */}
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+              <div className="sm:col-span-2">
+                <label className="block text-xs font-bold uppercase text-slate-300 mb-1">
+                  Quantity *
+                </label>
+                <input
+                  type="number"
+                  min="1"
+                  step="any"
+                  placeholder="e.g. 350"
+                  value={quantity}
+                  onChange={(e) => setQuantity(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-semibold focus:outline-none focus:border-blue-500 font-mono"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-xs font-bold uppercase text-slate-300 mb-1">
+                  Unit *
+                </label>
+                <select
+                  value={unit}
+                  onChange={(e) => setUnit(e.target.value)}
+                  className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-semibold focus:outline-none focus:border-blue-500"
+                >
+                  <option value="Pieces">Pieces</option>
+                  <option value="Bags">Bags</option>
+                  <option value="Tons">Tons</option>
+                  <option value="Square Feet">Square Feet</option>
+                  <option value="Hours">Hours</option>
+                  <option value="Days">Days</option>
+                  <option value="Trips">Trips</option>
+                  <option value="Units">Units</option>
+                </select>
+              </div>
             </div>
 
-            {/* DB-Driven Dynamic Category Fields Section */}
+            {/* Delivery / Service Location */}
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-300 mb-1">
+                Delivery / Service Location *
+              </label>
+              <input
+                type="text"
+                placeholder="Select Location"
+                value={addressText}
+                onChange={(e) => setAddressText(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-semibold focus:outline-none focus:border-blue-500"
+                required
+              />
+            </div>
+
+            {/* When do you need it? */}
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-300 mb-1">
+                When do you need it?
+              </label>
+              <input
+                type="date"
+                value={scheduledStart}
+                onChange={(e) => setScheduledStart(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm font-semibold focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Additional Requirements */}
+            <div>
+              <label className="block text-xs font-bold uppercase text-slate-300 mb-1">
+                Additional Requirements
+              </label>
+              <textarea
+                rows={3}
+                placeholder="Describe what you need..."
+                value={description}
+                onChange={(e) => setDescription(e.target.value)}
+                className="w-full px-4 py-3 rounded-xl bg-slate-900 border border-slate-700 text-white text-sm focus:outline-none focus:border-blue-500"
+              />
+            </div>
+
+            {/* Dynamic Category Specifications (if configured in DB) */}
             {dynamicFields.length > 0 && (
-              <div className="pt-2 border-t border-slate-800/80 space-y-4">
-                <div className="flex items-center justify-between">
-                  <h4 className="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
-                    <FileText className="w-4 h-4" />
-                    <span>Dynamic Category Specifications ({selectedCategory?.name})</span>
-                  </h4>
-                  <span className="text-[10px] text-slate-500 font-mono">Configured in DB</span>
-                </div>
+              <div className="pt-3 border-t border-slate-800/80 space-y-4">
+                <h4 className="text-xs font-bold uppercase tracking-wider text-purple-400 flex items-center gap-1.5">
+                  <FileText className="w-4 h-4" />
+                  <span>Category Specifications</span>
+                </h4>
 
                 <div className="grid sm:grid-cols-2 gap-4">
                   {dynamicFields.map((field) => {
                     const value = customValues[field.key];
-                    const isUploading = uploadingFields[field.key];
 
                     return (
                       <div key={field.key} className={`space-y-1 ${field.type === 'textarea' || field.type === 'location' ? 'sm:col-span-2' : ''}`}>
@@ -304,54 +421,6 @@ export default function CreateOpportunityModal({
                             className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-200 text-sm focus:outline-none focus:border-purple-500"
                             required={field.required}
                           />
-                        ) : field.type === 'datetime' || field.type === 'date' ? (
-                          <input
-                            type={field.type === 'datetime' ? 'datetime-local' : 'date'}
-                            value={value || ''}
-                            onChange={(e) => handleCustomFieldChange(field.key, e.target.value)}
-                            className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-200 text-sm focus:outline-none focus:border-purple-500"
-                            required={field.required}
-                          />
-                        ) : field.type === 'textarea' ? (
-                          <textarea
-                            rows={3}
-                            placeholder={field.placeholder || `Enter ${field.label}`}
-                            value={value || ''}
-                            onChange={(e) => handleCustomFieldChange(field.key, e.target.value)}
-                            className="w-full px-4 py-3 rounded-xl bg-slate-900/90 border border-slate-800 text-slate-200 text-sm focus:outline-none focus:border-purple-500"
-                            required={field.required}
-                          />
-                        ) : (field.type === 'photo' || field.type === 'video' || field.type === 'file') ? (
-                          <div className="space-y-2">
-                            <div className="flex items-center gap-3">
-                              <label className="cursor-pointer px-4 py-2.5 rounded-xl bg-purple-600/20 hover:bg-purple-600/30 text-purple-300 border border-purple-500/40 text-xs font-bold flex items-center gap-2 transition-all">
-                                {isUploading ? (
-                                  <>
-                                    <RefreshCw className="w-3.5 h-3.5 animate-spin" />
-                                    <span>Uploading...</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Upload className="w-3.5 h-3.5" />
-                                    <span>Upload {field.label}</span>
-                                  </>
-                                )}
-                                <input
-                                  type="file"
-                                  accept={field.type === 'photo' ? 'image/*' : field.type === 'video' ? 'video/*' : '*/*'}
-                                  onChange={(e) => {
-                                    if (e.target.files && e.target.files[0]) {
-                                      handleFileUpload(field.key, e.target.files[0]);
-                                    }
-                                  }}
-                                  className="hidden"
-                                />
-                              </label>
-                              {value && (
-                                <span className="text-xs font-mono text-emerald-400 truncate max-w-[200px]">✓ Uploaded ({value})</span>
-                              )}
-                            </div>
-                          </div>
                         ) : (
                           <input
                             type="text"
@@ -368,30 +437,103 @@ export default function CreateOpportunityModal({
                 </div>
               </div>
             )}
-
-            {/* Submit Buttons */}
-            <div className="pt-4 flex justify-end gap-3">
-              <button
-                type="button"
-                onClick={onClose}
-                className="px-5 py-3 rounded-xl border border-slate-800 text-slate-400 hover:text-white font-semibold text-sm transition-colors"
-              >
-                Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={loading}
-                className={`px-6 py-3 rounded-xl font-bold text-sm text-white flex items-center gap-2 shadow-lg transition-all ${
-                  type === 'NEED' 
-                    ? 'bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 shadow-blue-600/30' 
-                    : 'bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 shadow-emerald-600/30'
-                }`}
-              >
-                <Send className="w-4 h-4" />
-                <span>{loading ? 'Publishing...' : `Publish ${type === 'NEED' ? 'Need' : 'Offer'}`}</span>
-              </button>
-            </div>
           </form>
+        ) : (
+          /* ========================================================================= */
+          /* STEP 3 — REVIEW / SUBMIT */
+          /* ========================================================================= */
+          <div className="space-y-6">
+            <div className="p-6 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4">
+              <div className="border-b border-slate-800 pb-3">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Service</span>
+                <span className="text-lg font-extrabold text-white">{selectedCategory?.name || 'Service'}</span>
+              </div>
+
+              <div className="grid grid-cols-2 gap-4 border-b border-slate-800 pb-3">
+                <div>
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Quantity</span>
+                  <span className="text-sm font-extrabold text-emerald-400 font-mono">{quantity} {unit}</span>
+                </div>
+
+                <div>
+                  <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Date</span>
+                  <span className="text-sm font-semibold text-slate-200">
+                    {scheduledStart ? new Date(scheduledStart).toLocaleDateString('en-GB', { day: 'numeric', month: 'long', year: 'numeric' }) : 'As soon as needed'}
+                  </span>
+                </div>
+              </div>
+
+              <div className="border-b border-slate-800 pb-3">
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Location</span>
+                <span className="text-sm font-semibold text-slate-200">{addressText}</span>
+              </div>
+
+              <div>
+                <span className="text-[11px] font-bold text-slate-400 uppercase tracking-wider block">Requirements</span>
+                <span className="text-sm text-slate-300 leading-relaxed">{description || 'Need delivery to construction site.'}</span>
+              </div>
+
+              {Object.keys(customValues).length > 0 && (
+                <div className="pt-2 border-t border-slate-800 space-y-1">
+                  <span className="text-[11px] font-bold text-purple-400 uppercase tracking-wider block">Specifications</span>
+                  <div className="grid grid-cols-2 gap-2 text-xs">
+                    {Object.entries(customValues).map(([k, v]) => (
+                      <div key={k} className="p-2 rounded bg-slate-950/60 border border-slate-800">
+                        <span className="text-slate-500 block text-[10px] uppercase font-mono">{k}</span>
+                        <span className="text-slate-200 font-semibold">{String(v)}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+          </div>
+        )}
+        </div>
+
+        {/* Modal Fixed Footer with Action Buttons */}
+        {!success && (
+          <div className="p-4 sm:p-5 border-t border-slate-800/80 bg-[#0a0f1d] flex items-center justify-between gap-4 flex-none">
+            {step === 'FORM' ? (
+              <>
+                <button
+                  type="button"
+                  onClick={onClose}
+                  className="px-5 py-3 rounded-xl border border-slate-800 text-slate-400 hover:text-white font-semibold text-sm transition-colors"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  form="create-opportunity-form"
+                  className="px-6 py-3 rounded-xl font-bold text-sm text-white bg-blue-600 hover:bg-blue-500 shadow-lg shadow-blue-600/30 transition-all"
+                >
+                  CONTINUE
+                </button>
+              </>
+            ) : (
+              <>
+                <button
+                  type="button"
+                  onClick={() => setStep('FORM')}
+                  className="px-5 py-3 rounded-xl border border-slate-700 hover:border-slate-500 text-slate-300 font-bold text-sm inline-flex items-center gap-2 transition-all"
+                >
+                  <Edit2 className="w-4 h-4" />
+                  <span>EDIT</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={handleSubmit}
+                  disabled={loading}
+                  className="px-8 py-3.5 rounded-xl font-extrabold text-sm text-white bg-gradient-to-r from-blue-600 via-indigo-600 to-blue-500 hover:from-blue-500 hover:to-indigo-500 shadow-xl shadow-blue-600/30 flex items-center gap-2 transition-all"
+                >
+                  <Send className="w-4 h-4" />
+                  <span>{loading ? 'SUBMITTING...' : 'SUBMIT REQUEST'}</span>
+                </button>
+              </>
+            )}
+          </div>
         )}
       </div>
     </div>

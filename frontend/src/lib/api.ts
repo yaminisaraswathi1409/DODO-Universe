@@ -70,6 +70,8 @@ export interface Category {
   default_workflow: string;
   required_documents?: RequiredDocumentSpec[];
   opportunity_fields?: OpportunityFieldSpec[];
+  resources?: any[];
+  resource_requirements?: any[];
 }
 
 export interface UserServiceAsset {
@@ -96,9 +98,15 @@ export interface Opportunity {
   id: string;
   user_id: string;
   user?: UserProfile;
+  assigned_user_id?: string;
+  assigned_user?: UserProfile;
+  target_vendor_id?: string;
+  target_vendor?: UserProfile;
+  catalog_item_id?: string;
   category_id?: string;
   category?: Category;
   type: 'NEED' | 'OFFER';
+  order_mode?: string;
   title: string;
   description: string;
   workflow_model: string;
@@ -107,6 +115,9 @@ export interface Opportunity {
   lng: number;
   address_text?: string;
   radius_km: number;
+  quantity?: number;
+  unit_price?: number;
+  total_price?: number;
   budget_min?: number;
   budget_max?: number;
   price_unit?: string;
@@ -831,6 +842,154 @@ export async function updateCategoryRelatedServices(
   const data = await res.json();
   return data.data;
 }
+
+export interface UserNotification {
+  id: string;
+  user_id: string;
+  title: string;
+  message: string;
+  type?: string;
+  metadata?: any;
+  is_read: boolean;
+  created_at: string;
+}
+
+export async function getUserNotifications(userIdent: string, page = 1, limit = 50): Promise<{ notifications: UserNotification[]; unread_count: number }> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const params = new URLSearchParams({ user_id: userIdent, page: page.toString(), limit: limit.toString() });
+    const res = await fetch(`${API_BASE_URL}/notifications?${params.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return { notifications: [], unread_count: 0 };
+    const json = await res.json();
+    return {
+      notifications: json.data?.notifications || json.data || [],
+      unread_count: json.data?.unread_count || 0,
+    };
+  } catch {
+    return { notifications: [], unread_count: 0 };
+  }
+}
+
+export async function getUnreadNotificationCount(userIdent: string): Promise<number> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const params = new URLSearchParams({ user_id: userIdent });
+    const res = await fetch(`${API_BASE_URL}/notifications/unread-count?${params.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return 0;
+    const json = await res.json();
+    return json.data?.unread_count || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function markNotificationAsRead(id: string, userIdent?: string): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/${id}/read?user_id=${encodeURIComponent(userIdent || '')}`, {
+      method: 'POST',
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function markAllNotificationsAsRead(userIdent?: string): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/read-all?user_id=${encodeURIComponent(userIdent || '')}`, {
+      method: 'POST',
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function getStoredUser(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  const stored = localStorage.getItem('uop_user_profile');
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
+}
+
+export function clearUserSession(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem('uop_access_token');
+  localStorage.removeItem('uop_user_profile');
+}
+
+export interface VendorCatalogItem {
+  id: string;
+  vendor_user_id: string;
+  category_id?: string;
+  title: string;
+  description?: string;
+  unit_price: number;
+  pricing_model?: string;
+  unit_label?: string;
+  attributes?: Record<string, any>;
+  is_available?: boolean;
+  [key: string]: any;
+}
+
+export interface ProviderOffer {
+  id?: string;
+  offer_id?: string;
+  user_id?: string;
+  title: string;
+  description?: string;
+  pricing_model?: string;
+  unit_price?: number;
+  [key: string]: any;
+}
+
+export async function searchCatalog(query?: string, categoryId?: string): Promise<any> {
+  try {
+    const params = new URLSearchParams();
+    if (query) params.append('q', query);
+    if (categoryId) params.append('category_id', categoryId);
+    const res = await fetch(`${API_BASE_URL}/catalog/search?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getProviderOffers(categoryId?: string): Promise<ProviderOffer[]> {
+  try {
+    const params = new URLSearchParams();
+    if (categoryId) params.append('category_id', categoryId);
+    const res = await fetch(`${API_BASE_URL}/provider/offers?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
 
 
 

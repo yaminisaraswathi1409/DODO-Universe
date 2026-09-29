@@ -11,6 +11,8 @@ import { X, MapPin, User, Users, Calendar, Clock, Tag, FileText, CheckCircle, Re
 interface CreateOrderWizardModalProps {
   isOpen: boolean;
   onClose: () => void;
+  initialCategorySlug?: string;
+  directOrderParams?: any;
   onCreated?: (opp: Opportunity) => void;
 }
 

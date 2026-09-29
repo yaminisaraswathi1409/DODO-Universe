@@ -284,6 +284,72 @@ func main() {
 			oppHandler.ListPublic(w, r)
 		})
 
+		r.Get("/opportunities/matching", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListMatchingRequests(w, r)
+		})
+
+		r.Get("/opportunities/accepted", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListAcceptedOrders(w, r)
+		})
+
+		r.Get("/opportunities/my-orders", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListCustomerOrders(w, r)
+		})
+
+		r.Route("/notifications", func(r chi.Router) {
+			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.GetNotifications(w, r)
+			})
+
+			r.Get("/unread-count", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.GetUnreadNotificationCount(w, r)
+			})
+
+			r.Post("/read-all", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.MarkAllNotificationsAsRead(w, r)
+			})
+
+			r.Post("/{id}/read", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.MarkNotificationAsRead(w, r)
+			})
+		})
+
+		r.Post("/opportunities/create", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.Create(w, r)
+		})
+
 		r.Get("/opportunities/{id}", func(w http.ResponseWriter, r *http.Request) {
 			if oppHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -300,6 +366,14 @@ func main() {
 			oppHandler.UpdateStatus(w, r)
 		})
 
+		r.Post("/opportunities/{id}/accept", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.UpdateStatus(w, r)
+		})
+
 		r.Get("/opportunities/{id}/history", func(w http.ResponseWriter, r *http.Request) {
 			if oppHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -307,6 +381,15 @@ func main() {
 			}
 			oppHandler.GetStatusHistory(w, r)
 		})
+
+		r.Get("/opportunities/{id}/commuter-matches", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.GetCommuterMatches(w, r)
+		})
+
 
 		// OTP Verification & User Management Public endpoints
 		r.Post("/users/verify-otp", func(w http.ResponseWriter, r *http.Request) {

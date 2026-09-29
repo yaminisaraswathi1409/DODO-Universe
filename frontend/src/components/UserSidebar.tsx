@@ -3,7 +3,7 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { usePathname, useRouter, useSearchParams } from 'next/navigation';
-import { UserProfile } from '@/lib/api';
+import { UserProfile, getUnreadNotificationCount, getStoredUser, clearUserSession } from '@/lib/api';
 import {
   Home,
   Package,
@@ -37,26 +37,34 @@ export default function UserSidebar({ children }: UserSidebarProps) {
   const [collapsed, setCollapsed] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
   const [currentUser, setCurrentUser] = useState<UserProfile | null>(null);
+  const [unreadCount, setUnreadCount] = useState<number>(0);
+
+  const fetchUnreadCount = async (ident: string) => {
+    if (!ident) return;
+    try {
+      const count = await getUnreadNotificationCount(ident);
+      setUnreadCount(count);
+    } catch {
+      // keep state
+    }
+  };
 
   useEffect(() => {
-    if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('uop_user');
-      if (stored) {
-        try {
-          setCurrentUser(JSON.parse(stored));
-        } catch {
-          // ignore
-        }
+    const u = getStoredUser();
+    if (u) {
+      setCurrentUser(u);
+      if (u.phone || u.id) {
+        fetchUnreadCount(u.phone || u.id);
+        const interval = setInterval(() => {
+          fetchUnreadCount(u.phone || u.id);
+        }, 5000);
+        return () => clearInterval(interval);
       }
     }
   }, []);
 
   const handleLogout = () => {
-    if (typeof window !== 'undefined') {
-      localStorage.removeItem('uop_user');
-      localStorage.removeItem('uop_token');
-      localStorage.removeItem('uop_phone');
-    }
+    clearUserSession();
     router.push('/login');
   };
 
@@ -80,10 +88,16 @@ export default function UserSidebar({ children }: UserSidebarProps) {
       isActive: pathname === '/dashboard' && currentTab === 'orders',
     },
     {
-      label: 'Accepted Orders',
+      label: 'Matching Requests',
+      href: '/dashboard?tab=matching',
+      icon: Zap,
+      isActive: pathname === '/dashboard' && (currentTab === 'matching' || currentTab === 'requests'),
+    },
+    {
+      label: 'My Jobs',
       href: '/dashboard?tab=accepted',
       icon: CheckCircle2,
-      isActive: pathname === '/dashboard' && (currentTab === 'accepted' || currentTab === 'requests'),
+      isActive: pathname === '/dashboard' && currentTab === 'accepted',
     },
     {
       label: 'Services I Provide',
@@ -109,7 +123,7 @@ export default function UserSidebar({ children }: UserSidebarProps) {
       href: '/dashboard?tab=notifications',
       icon: Bell,
       isActive: pathname === '/dashboard' && currentTab === 'notifications',
-      badge: '2',
+      badge: unreadCount > 0 ? String(unreadCount) : undefined,
     },
     {
       label: 'Profile',

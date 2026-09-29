@@ -191,7 +191,7 @@ export default function SavedAddressesModal({
   };
 
   const modalContent = (
-    <div className={`relative w-full ${inline ? '' : 'max-w-lg'} bg-[#0d1322] border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5 ${inline ? '' : 'my-8'}`}>
+    <div className={`relative w-full ${inline ? '' : 'max-w-lg max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto flex flex-col overflow-hidden'} bg-[#0d1322] border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5`}>
       {!inline && (
         <button
           type="button"
@@ -497,7 +497,7 @@ export default function SavedAddressesModal({
       {inline ? (
         modalContent
       ) : (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-2 sm:p-4 overflow-hidden">
           {modalContent}
         </div>
       )}

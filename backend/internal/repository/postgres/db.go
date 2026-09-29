@@ -244,7 +244,21 @@ func NewPostgresDB(ctx context.Context, databaseURL string) (*DB, error) {
 			(gen_random_uuid(), 'essential-medicine-delivery', 'Essential Medicine Delivery', 'Doorstep medicine procurement and rural micro-logistics', 'Pill', 'MULTI_LAYER'),
 			(gen_random_uuid(), 'commuter-micro-logistics', 'Commuter Micro-Logistics', 'Opportunistic delivery matching for daily village commuters', 'Truck', 'INSTANT')
 		 ON CONFLICT (slug) DO UPDATE SET name = EXCLUDED.name;`,
+		`ALTER TABLE opportunities ADD COLUMN IF NOT EXISTS assigned_user_id UUID REFERENCES users(id) ON DELETE SET NULL;`,
+		`CREATE INDEX IF NOT EXISTS idx_opportunities_assigned ON opportunities (assigned_user_id);`,
+		`CREATE TABLE IF NOT EXISTS notifications (
+			id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+			user_id UUID NOT NULL REFERENCES users(id) ON DELETE CASCADE,
+			title VARCHAR(255) NOT NULL,
+			message TEXT NOT NULL,
+			type VARCHAR(50) DEFAULT 'INFO',
+			metadata JSONB DEFAULT '{}'::jsonb,
+			is_read BOOLEAN DEFAULT FALSE,
+			created_at TIMESTAMPTZ DEFAULT NOW()
+		);`,
+		`CREATE INDEX IF NOT EXISTS idx_notifications_user_id ON notifications (user_id);`,
 	}
+
 
 	for _, q := range autoMigrateQueries {
 		if _, err := pool.Exec(ctx, q); err != nil {
