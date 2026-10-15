@@ -42,10 +42,12 @@ func main() {
 	var userRepo *postgres.UserRepository
 	var oppRepo *postgres.OpportunityRepository
 	var logisticsRepo *postgres.LogisticsRepository
+	var catalogRepo *postgres.CatalogRepository
 	if db != nil {
 		userRepo = postgres.NewUserRepository(db)
 		oppRepo = postgres.NewOpportunityRepository(db)
 		logisticsRepo = postgres.NewLogisticsRepository(db)
+		catalogRepo = postgres.NewCatalogRepository(db)
 	}
 
 	// Initialize Workflow Plugin Engine
@@ -55,15 +57,28 @@ func main() {
 	var oppService *service.OpportunityService
 	var userService *service.UserService
 	var logisticsService *service.LogisticsService
+	var catalogService *service.CatalogService
 
 	if oppRepo != nil && userRepo != nil {
 		oppService = service.NewOpportunityService(oppRepo, userRepo, workflowRegistry)
+		if catalogRepo != nil {
+			oppService.SetCatalogRepository(catalogRepo)
+		}
 	}
 	if userRepo != nil {
 		userService = service.NewUserService(userRepo)
 	}
 	if logisticsRepo != nil && oppRepo != nil && userRepo != nil {
 		logisticsService = service.NewLogisticsService(logisticsRepo, oppRepo, userRepo)
+		if catalogRepo != nil {
+			logisticsService.SetCatalogRepository(catalogRepo)
+		}
+		if oppService != nil {
+			oppService.SetLogisticsRepository(logisticsService)
+		}
+	}
+	if catalogRepo != nil && userRepo != nil {
+		catalogService = service.NewCatalogService(catalogRepo, userRepo)
 	}
 
 	// Initialize Handlers
@@ -72,6 +87,7 @@ func main() {
 	var catHandler *handler.CategoryHandler
 	var userMgmtHandler *handler.UserManagementHandler
 	var logisticsHandler *handler.LogisticsHandler
+	var catalogHandler *handler.CatalogHandler
 
 	if userRepo != nil {
 		authHandler = handler.NewAuthHandler(userRepo)
@@ -87,6 +103,9 @@ func main() {
 	}
 	if logisticsService != nil {
 		logisticsHandler = handler.NewLogisticsHandler(logisticsService)
+	}
+	if catalogService != nil && userRepo != nil {
+		catalogHandler = handler.NewCatalogHandler(catalogService, userRepo)
 	}
 	uploadHandler := handler.NewUploadHandler("./public/uploads")
 
@@ -123,6 +142,9 @@ func main() {
 				"database": db != nil,
 			})
 		})
+
+		// File Upload endpoint
+		r.Post("/upload", uploadHandler.HandleFileUpload)
 
 		// Category endpoints
 		r.Get("/categories", func(w http.ResponseWriter, r *http.Request) {
@@ -202,6 +224,30 @@ func main() {
 			userMgmtHandler.AdminReviewServiceDocuments(w, r)
 		})
 
+		r.Get("/admin/catalog/requests", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.ListAdminCatalogRequests(w, r)
+		})
+
+		r.Post("/admin/catalog/{id}/approve", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.ApproveCatalogItem(w, r)
+		})
+
+		r.Post("/admin/catalog/{id}/reject", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.RejectCatalogItem(w, r)
+		})
+
 		r.Post("/admin/categories/{id}/requirements", func(w http.ResponseWriter, r *http.Request) {
 			if catHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -218,6 +264,54 @@ func main() {
 			catHandler.UpdateOpportunityFields(w, r)
 		})
 
+		r.Post("/admin/categories/{id}/vehicle-fields", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateVehicleFields(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/driver-fields", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateDriverFields(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/related-services", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateRelatedServices(w, r)
+		})
+
+		r.Put("/admin/categories/{id}/related-services", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateRelatedServices(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/resources", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateResources(w, r)
+		})
+
+		r.Post("/admin/categories/{id}/resource-requirements", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.UpdateResourceRequirements(w, r)
+		})
+
 		r.Post("/users/status", func(w http.ResponseWriter, r *http.Request) {
 			if userMgmtHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -226,6 +320,81 @@ func main() {
 			userMgmtHandler.UpdateStatus(w, r)
 		})
 
+		r.Post("/users/services", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AddUserService(w, r)
+		})
+
+		r.Post("/users/skills-assets", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.AddUserService(w, r)
+		})
+
+		// Vendor Catalog Marketplace endpoints
+		r.Get("/catalog/search", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.SearchCatalog(w, r)
+		})
+
+		r.Get("/vendors/{vendor_id}/catalog", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.GetVendorCatalog(w, r)
+		})
+
+		r.Post("/vendor/catalog", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.CreateCatalogItem(w, r)
+		})
+
+		r.Post("/services/create", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.CreateCatalogItem(w, r)
+		})
+
+		r.Put("/vendor/catalog/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.UpdateCatalogItem(w, r)
+		})
+
+		r.Delete("/vendor/catalog/{id}", func(w http.ResponseWriter, r *http.Request) {
+			if catalogHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Catalog service unavailable", nil)
+				return
+			}
+			catalogHandler.DeleteCatalogItem(w, r)
+		})
+
+		r.Get("/provider/offers", func(w http.ResponseWriter, r *http.Request) {
+			if catHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			catHandler.GetProviderOffers(w, r)
+		})
+
+
+
 
 		r.Get("/opportunities/public", func(w http.ResponseWriter, r *http.Request) {
 			if oppHandler == nil {
@@ -233,6 +402,72 @@ func main() {
 				return
 			}
 			oppHandler.ListPublic(w, r)
+		})
+
+		r.Get("/opportunities/matching", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListMatchingRequests(w, r)
+		})
+
+		r.Get("/opportunities/accepted", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListAcceptedOrders(w, r)
+		})
+
+		r.Get("/opportunities/my-orders", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ListCustomerOrders(w, r)
+		})
+
+		r.Route("/notifications", func(r chi.Router) {
+			r.Get("/", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.GetNotifications(w, r)
+			})
+
+			r.Get("/unread-count", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.GetUnreadNotificationCount(w, r)
+			})
+
+			r.Post("/read-all", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.MarkAllNotificationsAsRead(w, r)
+			})
+
+			r.Post("/{id}/read", func(w http.ResponseWriter, r *http.Request) {
+				if oppHandler == nil {
+					response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+					return
+				}
+				oppHandler.MarkNotificationAsRead(w, r)
+			})
+		})
+
+		r.Post("/opportunities/create", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.Create(w, r)
 		})
 
 		r.Get("/opportunities/{id}", func(w http.ResponseWriter, r *http.Request) {
@@ -251,6 +486,30 @@ func main() {
 			oppHandler.UpdateStatus(w, r)
 		})
 
+		r.Post("/opportunities/{id}/accept", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.UpdateStatus(w, r)
+		})
+
+		r.Post("/opportunities/{id}/confirm-resources", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ConfirmResources(w, r)
+		})
+
+		r.Put("/opportunities/{id}/resources", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.ConfirmResources(w, r)
+		})
+
 		r.Get("/opportunities/{id}/history", func(w http.ResponseWriter, r *http.Request) {
 			if oppHandler == nil {
 				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
@@ -258,6 +517,15 @@ func main() {
 			}
 			oppHandler.GetStatusHistory(w, r)
 		})
+
+		r.Get("/opportunities/{id}/commuter-matches", func(w http.ResponseWriter, r *http.Request) {
+			if oppHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			oppHandler.GetCommuterMatches(w, r)
+		})
+
 
 		// OTP Verification & User Management Public endpoints
 		r.Post("/users/verify-otp", func(w http.ResponseWriter, r *http.Request) {
@@ -425,10 +693,12 @@ func main() {
 			r.Post("/logistics/pairings", logisticsHandler.CreateVehicleDriverPairing)
 			r.Get("/opportunities/{id}/tree", logisticsHandler.GetTree)
 			r.Post("/logistics/cascade", logisticsHandler.TriggerCascade)
+			r.Post("/logistics/calculate-delivery", logisticsHandler.CalculateDelivery)
 			r.Post("/logistics/sos", logisticsHandler.ReportSOSIncident)
 			r.Post("/logistics/manifest", logisticsHandler.GenerateWayManifest)
 			r.Post("/logistics/manifest/pol", logisticsHandler.UploadPOL)
 			r.Post("/logistics/manifest/pod", logisticsHandler.UploadPOD)
+			r.Post("/opportunities/{id}/verify-delivery-otp", logisticsHandler.VerifyDeliveryOTP)
 			r.Post("/escrow/settle/{root_id}", logisticsHandler.SettleEscrow)
 		}
 	})

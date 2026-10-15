@@ -4,17 +4,38 @@ import React, { createContext, useContext, useState, useEffect } from 'react';
 
 export interface CartItem {
   id: string;
-  categoryId: string;
-  categoryName: string;
-  categorySlug: string;
+  vendorId?: string;
+  vendorName?: string;
+  vendorBrandName?: string;
+  vendorAvatar?: string;
+  vendorPhone?: string;
+  catalogItemId?: string;
+  vendorAssetId?: string;
+  optionId?: string;
+  selectedOptionTitle?: string;
+  includedServices?: string[];
+  selectedAddons?: Array<{ id: string; title: string; price: number }>;
+  categoryId?: string;
+  categoryName?: string;
+  categorySlug?: string;
   icon?: string;
+  imageUrl?: string;
   title: string;
   description?: string;
   quantity: number;
   quantityUnit?: string;
   unitPrice: number;
   totalPrice: number;
-  dynamicFields: Record<string, any>;
+  selectedDate?: string;
+  selectedTime?: string;
+  selectedVariant?: {
+    id?: string;
+    name?: string;
+    quantity?: number;
+    price?: number;
+  };
+  additionalChargesConfig?: Record<string, any>;
+  dynamicFields?: Record<string, any>;
   addressText?: string;
   lat?: number;
   lng?: number;
@@ -64,12 +85,34 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
   };
 
   const addToCart = (newItem: Omit<CartItem, 'id' | 'addedAt'>) => {
-    const item: CartItem = {
-      ...newItem,
-      id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
-      addedAt: new Date().toISOString(),
-    };
-    const updated = [...cartItems, item];
+    const existingIndex = cartItems.findIndex(
+      (item) =>
+        ((newItem.catalogItemId && item.catalogItemId === newItem.catalogItemId) ||
+         (newItem.vendorAssetId && item.vendorAssetId === newItem.vendorAssetId) ||
+         (newItem.title && item.title === newItem.title && newItem.vendorId && item.vendorId === newItem.vendorId)) &&
+        ((newItem.optionId && item.optionId === newItem.optionId) || (!newItem.optionId && !item.optionId))
+    );
+
+    let updated: CartItem[];
+    if (existingIndex >= 0) {
+      updated = [...cartItems];
+      const existing = cartItems[existingIndex];
+      const combinedQty = existing.quantity + newItem.quantity;
+      updated[existingIndex] = {
+        ...newItem,
+        id: existing.id,
+        quantity: combinedQty,
+        totalPrice: combinedQty * newItem.unitPrice,
+        addedAt: new Date().toISOString(),
+      };
+    } else {
+      const item: CartItem = {
+        ...newItem,
+        id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+        addedAt: new Date().toISOString(),
+      };
+      updated = [...cartItems, item];
+    }
     saveCart(updated);
     setIsCartOpen(true);
   };

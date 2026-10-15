@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { verifyOTP } from '@/lib/api';
 import { Smartphone, CheckCircle, ArrowRight, ShieldCheck, RefreshCw } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 export default function VerifyOTPPage() {
   const router = useRouter();
@@ -29,6 +30,11 @@ export default function VerifyOTPPage() {
 
   const handleVerify = async (e: React.FormEvent) => {
     e.preventDefault();
+    const phoneValidation = validatePhoneNumber(phone);
+    if (!phoneValidation.isValid) {
+      setError(phoneValidation.error || 'Please enter a valid mobile number');
+      return;
+    }
     if (!otp || otp.length < 6) {
       setError('Please enter a valid 6-digit OTP code');
       return;
@@ -59,45 +65,48 @@ export default function VerifyOTPPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex items-center justify-center p-6">
-      <div className="glass-panel p-8 sm:p-10 rounded-3xl border border-slate-800 w-full max-w-md space-y-6">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6">
+      <div className="bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 w-full max-w-md space-y-6 shadow-xl">
         <div className="text-center">
-          <div className="w-14 h-14 rounded-2xl bg-blue-600/20 border border-blue-500/30 flex items-center justify-center mx-auto mb-4">
-            <Smartphone className="w-7 h-7 text-blue-400" />
+          <div className="w-14 h-14 rounded-2xl bg-black text-white flex items-center justify-center mx-auto mb-4 shadow-md">
+            <Smartphone className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white">Mobile OTP Verification</h1>
-          <p className="text-slate-400 text-xs sm:text-sm mt-2">
-            Step 1 of 3: Enter the 6-digit OTP code sent to <strong className="text-slate-200">{phone}</strong>
+          <h1 className="text-2xl font-black text-slate-900">Mobile OTP Verification</h1>
+          <p className="text-slate-600 text-xs sm:text-sm mt-2">
+            Step 1 of 3: Enter the 6-digit OTP code sent to <strong className="text-slate-900">{phone}</strong>
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs text-center font-medium">
+          <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs text-center font-medium">
             {error}
           </div>
         )}
 
         <form onSubmit={handleVerify} className="space-y-4">
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Phone Number</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Phone Number</label>
             <input
-              type="text"
+              type="tel"
               value={phone}
-              onChange={(e) => setPhone(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-blue-500"
+              onChange={(e) => {
+                setError('');
+                setPhone(sanitizePhoneInput(e.target.value));
+              }}
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
               placeholder="+91..."
               required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
             <input
               type="text"
               maxLength={6}
               value={otp}
               onChange={(e) => setOtp(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-center tracking-[0.5em] font-mono text-xl text-blue-400 focus:outline-none focus:border-blue-500"
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-center tracking-[0.5em] font-mono text-xl text-black focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
               placeholder="123456"
               required
             />
@@ -106,7 +115,7 @@ export default function VerifyOTPPage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3.5 rounded-xl bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-blue-600/25 flex items-center justify-center gap-2"
+            className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-md flex items-center justify-center gap-2"
           >
             {loading ? (
               <>

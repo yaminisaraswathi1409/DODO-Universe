@@ -157,28 +157,74 @@ type UserSkillAsset struct {
 	UpdatedAt       time.Time          `json:"updated_at"`
 }
 
+type OrderMode string
+
+const (
+	OrderModeCatalog OrderMode = "CATALOG_ORDER"
+	OrderModeGeneral OrderMode = "GENERAL_BROADCAST"
+)
+
 // Category definition
 type Category struct {
-	ID                uuid.UUID       `json:"id"`
-	Slug              string          `json:"slug"`
-	Name              string          `json:"name"`
-	Description       string          `json:"description,omitempty"`
-	Icon              string          `json:"icon,omitempty"`
-	DefaultWorkflow   WorkflowModel   `json:"default_workflow"`
-	RequiredDocuments json.RawMessage `json:"required_documents,omitempty"`
-	OpportunityFields json.RawMessage `json:"opportunity_fields,omitempty"`
-	CreatedAt         time.Time       `json:"created_at"`
+	ID                   uuid.UUID       `json:"id"`
+	Slug                 string          `json:"slug"`
+	Name                 string          `json:"name"`
+	Description          string          `json:"description,omitempty"`
+	Icon                 string          `json:"icon,omitempty"`
+	DefaultWorkflow      WorkflowModel   `json:"default_workflow"`
+	RequiredDocuments    json.RawMessage `json:"required_documents,omitempty"`
+	OpportunityFields    json.RawMessage `json:"opportunity_fields,omitempty"`
+	VehicleFields        json.RawMessage `json:"vehicle_fields,omitempty"`
+	DriverFields         json.RawMessage `json:"driver_fields,omitempty"`
+	ResourceRequirements json.RawMessage `json:"resource_requirements,omitempty"`
+	Resources            json.RawMessage `json:"resources,omitempty"`
+	RelatedServices      json.RawMessage `json:"related_services,omitempty"`
+	CreatedAt            time.Time       `json:"created_at"`
 }
 
+// VendorCatalogItem represents a product or service offered in a vendor's catalog (1 Vendor -> MANY items)
+type VendorCatalogItem struct {
+	ID               uuid.UUID       `json:"id"`
+	VendorAssetID    *uuid.UUID      `json:"vendor_asset_id,omitempty"`
+	VendorAsset      *UserSkillAsset `json:"vendor_asset,omitempty"`
+	VendorUserID     uuid.UUID       `json:"vendor_user_id"`
+	VendorUser       *User           `json:"vendor_user,omitempty"`
+	CategoryID       *uuid.UUID      `json:"category_id,omitempty"`
+	Category         *Category       `json:"category,omitempty"`
+	Title            string          `json:"title"`
+	Description      string          `json:"description,omitempty"`
+	SKU              string          `json:"sku,omitempty"`
+	UnitPrice        float64         `json:"unit_price"`
+	PriceUnit        string          `json:"price_unit"`
+	StockQuantity    int             `json:"stock_quantity"`
+	MinOrderQuantity int             `json:"min_order_quantity"`
+	Images           json.RawMessage `json:"images,omitempty"`
+	Attributes       json.RawMessage `json:"attributes,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	RejectionReason  string          `json:"rejection_reason,omitempty"`
+	PickupLat        float64         `json:"pickup_lat,omitempty"`
+	PickupLng        float64         `json:"pickup_lng,omitempty"`
+	PickupAddress    string          `json:"pickup_address,omitempty"`
+	IsAvailable      bool            `json:"is_available"`
+	CreatedAt        time.Time       `json:"created_at"`
+	UpdatedAt        time.Time       `json:"updated_at"`
+}
 
 // Opportunity (Represents a Need or Offer)
 type Opportunity struct {
-	ID                  uuid.UUID         `json:"id"`
-	UserID              uuid.UUID         `json:"user_id"`
-	User                *User             `json:"user,omitempty"`
-	CategoryID          *uuid.UUID        `json:"category_id,omitempty"`
+	ID                  uuid.UUID          `json:"id"`
+	UserID              uuid.UUID          `json:"user_id"`
+	User                *User              `json:"user,omitempty"`
+	AssignedUserID      *uuid.UUID         `json:"assigned_user_id,omitempty"`
+	AssignedUser        *User              `json:"assigned_user,omitempty"`
+	TargetVendorID      *uuid.UUID         `json:"target_vendor_id,omitempty"`
+	TargetVendor        *User              `json:"target_vendor,omitempty"`
+	CatalogItemID       *uuid.UUID         `json:"catalog_item_id,omitempty"`
+	CatalogItem         *VendorCatalogItem `json:"catalog_item,omitempty"`
+	CategoryID          *uuid.UUID         `json:"category_id,omitempty"`
 	Category            *Category         `json:"category,omitempty"`
 	Type                OpportunityType   `json:"type"`
+	OrderMode           OrderMode         `json:"order_mode"`
 	Title               string            `json:"title"`
 	Description         string            `json:"description"`
 	WorkflowModel       WorkflowModel     `json:"workflow_model"`
@@ -187,6 +233,9 @@ type Opportunity struct {
 	Lng                 float64           `json:"lng"`
 	AddressText         string            `json:"address_text,omitempty"`
 	RadiusKM            float64           `json:"radius_km"`
+	Quantity            *float64          `json:"quantity,omitempty"`
+	UnitPrice           *float64          `json:"unit_price,omitempty"`
+	TotalPrice          *float64          `json:"total_price,omitempty"`
 	BudgetMin           *float64          `json:"budget_min,omitempty"`
 	BudgetMax           *float64          `json:"budget_max,omitempty"`
 	PriceUnit           string            `json:"price_unit,omitempty"`
@@ -197,6 +246,84 @@ type Opportunity struct {
 	CreatedAt           time.Time         `json:"created_at"`
 	UpdatedAt           time.Time         `json:"updated_at"`
 }
+
+
+// Notification represents a user notification
+type Notification struct {
+	ID        uuid.UUID       `json:"id"`
+	UserID    uuid.UUID       `json:"user_id"`
+	Title     string          `json:"title"`
+	Message   string          `json:"message"`
+	Type      string          `json:"type"`
+	Metadata  json.RawMessage `json:"metadata,omitempty"`
+	IsRead    bool            `json:"is_read"`
+	CreatedAt time.Time       `json:"created_at"`
+}
+
+// ResourceRequirement represents dynamic resource requirements attached to a category
+type ResourceRequirement struct {
+	ID          uuid.UUID       `json:"id"`
+	CategoryID  uuid.UUID       `json:"category_id"`
+	Type        string          `json:"type"` // e.g., 'DRIVER', 'VEHICLE', 'EQUIPMENT', 'HEAVY_MACHINERY', 'LABOUR'
+	Label       string          `json:"label"`
+	IsRequired  bool            `json:"is_required"`
+	Description string          `json:"description,omitempty"`
+	Options     json.RawMessage `json:"options,omitempty"`
+	CreatedAt   time.Time       `json:"created_at"`
+}
+
+
+// DynamicResource represents assigned dynamic resources for an asset or opportunity
+type DynamicResource struct {
+	ID            uuid.UUID       `json:"id"`
+	RequirementID uuid.UUID       `json:"requirement_id"`
+	AssetID       *uuid.UUID      `json:"asset_id,omitempty"`
+	OpportunityID *uuid.UUID      `json:"opportunity_id,omitempty"`
+	ResourceType  string          `json:"resource_type"`
+	Details       json.RawMessage `json:"details"`
+	CreatedAt     time.Time       `json:"created_at"`
+}
+
+// CommuteRouteMetadata (Scenario 2 Daily Commuter Route attributes)
+type CommuteRouteMetadata struct {
+	OriginAddress      string   `json:"origin_address"`
+	OriginLat          float64  `json:"origin_lat"`
+	OriginLng          float64  `json:"origin_lng"`
+	DestinationAddress string   `json:"destination_address"`
+	DestinationLat     float64  `json:"destination_lat"`
+	DestinationLng     float64  `json:"destination_lng"`
+	TravelFrequency    string   `json:"travel_frequency"` // 'DAILY', 'WEEKDAYS', 'WEEKENDS'
+	AvailableDays      []string `json:"available_days,omitempty"`
+	TravelTime         string   `json:"travel_time,omitempty"`
+	TravelMode         string   `json:"travel_mode,omitempty"` // 'BIKE', 'AUTO', 'CAR', 'TRACTOR'
+	IsActive           bool     `json:"is_active"`
+}
+
+// CommuteMatchResult (PostGIS Spatial Commute Route Match output)
+type CommuteMatchResult struct {
+	OfferID               uuid.UUID  `json:"offer_id"`
+	NeedID                uuid.UUID  `json:"need_id"`
+	ProviderID            uuid.UUID  `json:"provider_id"`
+	Provider              *User      `json:"provider,omitempty"`
+	OfferTitle            string     `json:"offer_title"`
+	OriginAddress         string     `json:"origin_address"`
+	DestinationAddress    string     `json:"destination_address"`
+	PickupAddress         string     `json:"pickup_address"`
+	DeliveryAddress       string     `json:"delivery_address"`
+	PickupDetourMeters    float64    `json:"pickup_detour_meters"`
+	DeliveryDetourMeters  float64    `json:"delivery_detour_meters"`
+	TotalDetourMeters     float64    `json:"total_detour_meters"`
+	EstimatedDetourMin    int        `json:"estimated_detour_min"`
+	EstimatedPayoutCents  int        `json:"estimated_payout_cents"`
+	FormattedPayout       string     `json:"formatted_payout"`
+	TravelMode            string     `json:"travel_mode"`
+	TravelFrequency       string     `json:"travel_frequency"`
+	CreatedAt             time.Time  `json:"created_at"`
+}
+
+
+
+
 
 // OpportunityMatch (Match score & proposed agreement)
 type OpportunityMatch struct {
@@ -357,5 +484,103 @@ type OpportunityStatusHistory struct {
 	ChangedByUserID *uuid.UUID `json:"changed_by_user_id,omitempty"`
 	Notes           string     `json:"notes,omitempty"`
 	CreatedAt       time.Time  `json:"created_at"`
+}
+
+// VendorDeliveryRule represents dynamic distance-based delivery pricing tiers
+type VendorDeliveryRule struct {
+	ID                  uuid.UUID  `json:"id"`
+	VendorUserID        *uuid.UUID `json:"vendor_user_id,omitempty"`
+	CategoryID          *uuid.UUID `json:"category_id,omitempty"`
+	VendorAssetID       *uuid.UUID `json:"vendor_asset_id,omitempty"`
+	CatalogItemID       *uuid.UUID `json:"catalog_item_id,omitempty"`
+	MaxServiceRadiusKM  float64    `json:"max_service_radius_km"`
+	MinDistanceKM       float64    `json:"min_distance_km"`
+	MaxDistanceKM       float64    `json:"max_distance_km"`
+	DeliveryFee         float64    `json:"delivery_fee"`
+	IsActive            bool       `json:"is_active"`
+	CreatedAt           time.Time  `json:"created_at"`
+	UpdatedAt           time.Time  `json:"updated_at"`
+}
+
+// DeliveryCalculationRequest represents input for delivery fee evaluation
+type DeliveryCalculationRequest struct {
+	VendorUserID  string   `json:"vendor_user_id,omitempty"`
+	CatalogItemID string   `json:"catalog_item_id,omitempty"`
+	VendorAssetID string   `json:"vendor_asset_id,omitempty"`
+	CategoryID    string   `json:"category_id,omitempty"`
+	OptionID      string   `json:"option_id,omitempty"`
+	VariantID     string   `json:"variant_id,omitempty"`
+	AddonIDs      []string `json:"addon_ids,omitempty"`
+	Quantity      float64  `json:"quantity,omitempty"`
+	Duration      float64  `json:"duration,omitempty"`
+	CustomerLat   float64  `json:"customer_lat"`
+	CustomerLng   float64  `json:"customer_lng"`
+}
+
+// DeliveryCalculationResult represents output of delivery calculation API
+type DeliveryCalculationResult struct {
+	IsEligible         bool                `json:"is_eligible"`
+	VendorUserID       string              `json:"vendor_user_id,omitempty"`
+	CatalogItemID      string              `json:"catalog_item_id,omitempty"`
+	VendorAssetID      string              `json:"vendor_asset_id,omitempty"`
+	ItemTitle          string              `json:"item_title,omitempty"`
+	PricingModel       string              `json:"pricing_model,omitempty"`
+	UnitPrice          float64             `json:"unit_price"`
+	Quantity           float64             `json:"quantity"`
+	Subtotal           float64             `json:"subtotal"`
+	DistanceKM         float64             `json:"distance_km"`
+	MaxServiceRadiusKM float64             `json:"max_service_radius_km"`
+	DeliveryCharge     float64             `json:"delivery_charge"`
+	TransportCharge    float64             `json:"transport_charge"`
+	DriverCharge       float64             `json:"driver_charge"`
+	DriverIncluded     bool                `json:"driver_included"`
+	LoadingCharge      float64             `json:"loading_charge"`
+	UnloadingCharge    float64             `json:"unloading_charge"`
+	ServiceFee         float64             `json:"service_fee"`
+	TotalCharges       float64             `json:"total_charges"`
+	FinalPayable       float64             `json:"final_payable"`
+	RejectionReason    string              `json:"rejection_reason,omitempty"`
+	AppliedRule        *VendorDeliveryRule `json:"applied_rule,omitempty"`
+}
+
+type PriceSnapshotItem struct {
+	Title     string  `json:"title"`
+	Quantity  float64 `json:"quantity"`
+	UnitPrice float64 `json:"unit_price"`
+	Subtotal  float64 `json:"subtotal"`
+	Unit      string  `json:"unit,omitempty"`
+}
+
+type PriceSnapshotCharges struct {
+	Transport float64 `json:"transport"`
+	Driver    float64 `json:"driver"`
+	Loading   float64 `json:"loading"`
+	Unloading float64 `json:"unloading"`
+	Delivery  float64 `json:"delivery"`
+	Service   float64 `json:"service"`
+}
+
+// PriceSnapshot stores frozen immutable billing details attached to catalog orders
+type PriceSnapshot struct {
+	ItemTitle       string               `json:"item_title"`
+	PricingModel    string               `json:"pricing_model"`
+	UnitPrice       float64              `json:"unit_price"`
+	Quantity        float64              `json:"quantity"`
+	Subtotal        float64              `json:"subtotal"`
+	DistanceKM      float64              `json:"distance_km"`
+	DeliveryCharge  float64              `json:"delivery_charge"`
+	TransportCharge float64              `json:"transport_charge"`
+	DriverCharge    float64              `json:"driver_charge"`
+	DriverIncluded  bool                 `json:"driver_included"`
+	LoadingCharge   float64              `json:"loading_charge"`
+	UnloadingCharge float64              `json:"unloading_charge"`
+	ServiceFee      float64              `json:"service_fee"`
+	TotalCharges    float64              `json:"total_charges"`
+	FinalPayable    float64              `json:"final_payable"`
+	Items           []PriceSnapshotItem  `json:"items,omitempty"`
+	Charges         PriceSnapshotCharges `json:"charges"`
+	AppliedRuleID   *uuid.UUID           `json:"applied_rule_id,omitempty"`
+	RuleSummary     string               `json:"rule_summary,omitempty"`
+	CalculatedAt    time.Time            `json:"calculated_at"`
 }
 

@@ -1,0 +1,7 @@
+./auth_handler.go
+./catalog_handler.go
+./category_handler.go
+./logistics_handler.go
+./opportunity_handler.go
+./upload_handler.go
+./user_management_handler.go

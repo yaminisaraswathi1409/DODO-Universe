@@ -280,14 +280,23 @@ func (h *UserManagementHandler) ListUsers(w http.ResponseWriter, r *http.Request
 }
 
 type AddUserServicePayload struct {
-	UserID      string   `json:"user_id"`
-	Phone       string   `json:"phone"`
-	CategoryID  string   `json:"category_id"`
-	AssetType   string   `json:"asset_type"` // e.g. ELECTRICIAN, PLUMBER, CLEANING, TRACTOR
-	Title       string   `json:"title"`
-	Description string   `json:"description"`
-	HourlyRate  *float64 `json:"hourly_rate"`
-	DailyRate   *float64 `json:"daily_rate"`
+	UserID           string                 `json:"user_id"`
+	Phone            string                 `json:"phone"`
+	CategoryID       string                 `json:"category_id"`
+	AssetType        string                 `json:"asset_type"` // e.g. ELECTRICIAN, PLUMBER, CLEANING, TRACTOR, BRICKS
+	Title            string                 `json:"title"`
+	Description      string                 `json:"description"`
+	HourlyRate       *float64               `json:"hourly_rate"`
+	DailyRate        *float64               `json:"daily_rate"`
+	Lat              *float64               `json:"lat,omitempty"`
+	Lng              *float64               `json:"lng,omitempty"`
+	OfferType        string                 `json:"offer_type,omitempty"` // WITH_TRANSPORT or WITHOUT_TRANSPORT
+	UnitPrice        *float64               `json:"unit_price,omitempty"`
+	CoverageRadiusKM *float64               `json:"coverage_radius_km,omitempty"`
+	DistanceSlabs    []map[string]interface{}`json:"distance_slabs,omitempty"`
+	IncludedServices map[string]interface{} `json:"included_services,omitempty"`
+	Attributes       map[string]interface{} `json:"attributes,omitempty"`
+	AutoApprove      bool                   `json:"auto_approve,omitempty"`
 }
 
 func (h *UserManagementHandler) AddUserService(w http.ResponseWriter, r *http.Request) {
@@ -334,13 +343,51 @@ func (h *UserManagementHandler) AddUserService(w http.ResponseWriter, r *http.Re
 		}
 	}
 
-	service, err := h.userService.AddUserSkillAsset(r.Context(), targetUser.ID, catID, p.AssetType, p.Title, p.Description, p.HourlyRate, p.DailyRate)
+	latVal := 17.25
+	lngVal := 78.95
+	if p.Lat != nil && *p.Lat != 0 {
+		latVal = *p.Lat
+	} else if targetUser.Lat != 0 {
+		latVal = targetUser.Lat
+	}
+	if p.Lng != nil && *p.Lng != 0 {
+		lngVal = *p.Lng
+	} else if targetUser.Lng != 0 {
+		lngVal = targetUser.Lng
+	}
+
+	attrMap := p.Attributes
+	if attrMap == nil {
+		attrMap = make(map[string]interface{})
+	}
+	if p.OfferType != "" {
+		attrMap["offer_type"] = p.OfferType
+	}
+	if p.UnitPrice != nil {
+		attrMap["unit_price"] = *p.UnitPrice
+	}
+	if p.CoverageRadiusKM != nil {
+		attrMap["coverage_radius_km"] = *p.CoverageRadiusKM
+	}
+	if p.DistanceSlabs != nil {
+		attrMap["distance_slabs"] = p.DistanceSlabs
+	}
+	if p.IncludedServices != nil {
+		attrMap["included_services"] = p.IncludedServices
+	}
+
+	attrBytes, _ := json.Marshal(attrMap)
+
+	service, err := h.userService.AddUserSkillAssetWithAttributes(
+		r.Context(), targetUser.ID, catID, p.AssetType, p.Title, p.Description,
+		p.HourlyRate, p.DailyRate, latVal, lngVal, string(attrBytes), p.AutoApprove,
+	)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to add service request", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, "Service request created in PENDING_APPROVAL status", service)
+	response.JSON(w, http.StatusCreated, "Service offer registered successfully", service)
 }
 
 type SubmitServiceDocumentsPayload struct {

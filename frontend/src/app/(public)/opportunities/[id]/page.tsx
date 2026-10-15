@@ -32,11 +32,11 @@ export default async function OpportunityDetailPage({ params }: { params: { id: 
 
   if (!opp) {
     return (
-      <div className="min-h-screen bg-[#090d16] text-white flex items-center justify-center p-6">
-        <div className="glass-panel p-10 rounded-3xl text-center max-w-md border border-slate-800">
-          <h2 className="text-2xl font-bold">Opportunity Not Found</h2>
-          <p className="text-slate-400 text-sm mt-2">The opportunity requested does not exist or has been completed.</p>
-          <Link href="/opportunities" className="mt-6 inline-block px-6 py-2.5 rounded-xl bg-blue-600 font-semibold text-sm">
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6">
+        <div className="bg-white p-10 rounded-3xl text-center max-w-md border border-slate-200 shadow-xl">
+          <h2 className="text-2xl font-black text-slate-900">Opportunity Not Found</h2>
+          <p className="text-slate-600 text-sm mt-2">The opportunity requested does not exist or has been completed.</p>
+          <Link href="/opportunities" className="mt-6 inline-block px-6 py-2.5 rounded-xl bg-black text-white hover:bg-slate-800 font-semibold text-sm transition-all shadow-md">
             Return to Feed
           </Link>
         </div>

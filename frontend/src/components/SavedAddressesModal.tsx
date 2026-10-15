@@ -4,6 +4,7 @@ import React, { useState, useEffect } from 'react';
 import { UserAddress, getUserAddresses, createUserAddress, setDefaultUserAddress, deleteUserAddress, UserProfile } from '@/lib/api';
 import LocationSelectorModal, { LocationData } from './LocationSelectorModal';
 import { MapPin, Plus, Check, Star, Trash2, Home, Briefcase, Building2, Navigation, Edit3, X, AlertCircle, Phone, User, Compass } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 interface SavedAddressesModalProps {
   isOpen: boolean;
@@ -145,6 +146,14 @@ export default function SavedAddressesModal({
       return;
     }
 
+    if (receiverPhone.trim()) {
+      const phoneValidation = validatePhoneNumber(receiverPhone.trim());
+      if (!phoneValidation.isValid) {
+        alert(phoneValidation.error || 'Please enter a valid 10-digit mobile number for receiver.');
+        return;
+      }
+    }
+
     const finalLabel = label === 'Other' ? (customLabelInput.trim() || 'Other') : label;
 
     let savedAddr: UserAddress | null = null;
@@ -184,34 +193,34 @@ export default function SavedAddressesModal({
 
   const getLabelIcon = (lbl: string) => {
     const lower = lbl.toLowerCase();
-    if (lower.includes('home')) return <Home className="w-4 h-4 text-emerald-400" />;
-    if (lower.includes('work') || lower.includes('office')) return <Briefcase className="w-4 h-4 text-blue-400" />;
-    if (lower.includes('site') || lower.includes('construction') || lower.includes('yard')) return <Building2 className="w-4 h-4 text-amber-400" />;
-    return <MapPin className="w-4 h-4 text-rose-400" />;
+    if (lower.includes('home')) return <Home className="w-4 h-4 text-black" />;
+    if (lower.includes('work') || lower.includes('office')) return <Briefcase className="w-4 h-4 text-black" />;
+    if (lower.includes('site') || lower.includes('construction') || lower.includes('yard')) return <Building2 className="w-4 h-4 text-black" />;
+    return <MapPin className="w-4 h-4 text-black" />;
   };
 
   const modalContent = (
-    <div className={`relative w-full ${inline ? '' : 'max-w-lg'} bg-[#0d1322] border border-slate-800 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5 ${inline ? '' : 'my-8'}`}>
+    <div className={`relative w-full ${inline ? '' : 'max-w-lg max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto flex flex-col overflow-hidden'} bg-white border border-slate-200 rounded-3xl p-6 sm:p-7 shadow-2xl space-y-5 text-slate-900`}>
       {!inline && (
         <button
           type="button"
           onClick={onClose}
-          className="absolute top-5 right-5 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors"
+          className="absolute top-5 right-5 p-2 rounded-full text-slate-500 hover:text-black hover:bg-slate-100 transition-colors"
         >
           <X className="w-5 h-5" />
         </button>
       )}
 
       <div>
-        <div className="flex items-center gap-2 text-rose-400 mb-1 font-bold text-xs uppercase tracking-wider">
-          <MapPin className="w-4 h-4" />
+        <div className="flex items-center gap-2 text-black mb-1 font-bold text-xs uppercase tracking-wider">
+          <MapPin className="w-4 h-4 text-black" />
           <span>Delivery Location Manager</span>
         </div>
 
-            <h3 className="text-xl sm:text-2xl font-extrabold text-white">
+            <h3 className="text-xl sm:text-2xl font-black text-slate-900">
               {view === 'LIST' ? 'Select Delivery Address' : 'Add New Saved Address'}
             </h3>
-            <p className="text-slate-400 text-xs mt-1">
+            <p className="text-slate-600 text-xs mt-1">
               {view === 'LIST'
                 ? 'Choose a saved address for this order or add a new delivery location.'
                 : 'Enter details below to set your delivery location.'}
@@ -221,15 +230,15 @@ export default function SavedAddressesModal({
           {view === 'LIST' ? (
             <div className="space-y-4">
               {loading ? (
-                <div className="py-8 text-center text-slate-400 text-sm flex items-center justify-center gap-2">
-                  <div className="w-4 h-4 border-2 border-rose-500 border-t-transparent rounded-full animate-spin"></div>
+                <div className="py-8 text-center text-slate-600 text-sm flex items-center justify-center gap-2">
+                  <div className="w-4 h-4 border-2 border-black border-t-transparent rounded-full animate-spin"></div>
                   <span>Loading saved addresses...</span>
                 </div>
               ) : addresses.length === 0 ? (
-                <div className="p-6 rounded-2xl bg-slate-900/60 border border-slate-800 text-center space-y-3">
-                  <MapPin className="w-8 h-8 text-slate-500 mx-auto" />
-                  <p className="text-slate-300 text-sm font-medium">No saved addresses found</p>
-                  <p className="text-slate-400 text-xs">Add your Home, Work, or Site address for 1-click orders.</p>
+                <div className="p-6 rounded-2xl bg-slate-50 border border-slate-200 text-center space-y-3">
+                  <MapPin className="w-8 h-8 text-slate-400 mx-auto" />
+                  <p className="text-slate-900 text-sm font-bold">No saved addresses found</p>
+                  <p className="text-slate-600 text-xs">Add your Home, Work, or Site address for 1-click orders.</p>
                   <button
                     type="button"
                     onClick={() => {
@@ -237,7 +246,7 @@ export default function SavedAddressesModal({
                       setReceiverPhone(currentUser?.phone || '');
                       setView('ADD');
                     }}
-                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-lg shadow-rose-600/20 transition-all"
+                    className="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-xs shadow-md transition-all"
                   >
                     <Plus className="w-4 h-4" />
                     <span>Add New Address</span>
@@ -266,31 +275,33 @@ export default function SavedAddressesModal({
                         }}
                         className={`group relative p-4 rounded-2xl border transition-all cursor-pointer flex items-start gap-3.5 ${
                           isSelected
-                            ? 'bg-gradient-to-r from-rose-950/40 to-slate-900 border-rose-500/60 shadow-lg shadow-rose-500/10'
-                            : 'bg-slate-900/60 border-slate-800 hover:border-slate-700 hover:bg-slate-900'
+                            ? 'bg-black text-white border-black shadow-md'
+                            : 'bg-white border-slate-200 hover:border-slate-300 hover:bg-slate-50 text-slate-900'
                         }`}
                       >
                         <div className="mt-1 flex-shrink-0">{getLabelIcon(addr.label)}</div>
                         <div className="flex-1 min-w-0 pr-12">
                           <div className="flex items-center gap-2 flex-wrap">
-                            <span className="text-white font-bold text-sm">{addr.label}</span>
+                            <span className={`font-bold text-sm ${isSelected ? 'text-white' : 'text-slate-900'}`}>{addr.label}</span>
                             {addr.is_default && (
-                              <span className="px-2 py-0.5 rounded-full bg-emerald-500/20 border border-emerald-500/40 text-emerald-400 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1">
-                                <Star className="w-3 h-3 fill-emerald-400" /> Default
+                              <span className={`px-2 py-0.5 rounded-full text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 border ${
+                                isSelected ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-100 border-slate-300 text-slate-900'
+                              }`}>
+                                <Star className="w-3 h-3 fill-current" /> Default
                               </span>
                             )}
                           </div>
-                          <p className="text-slate-300 text-xs mt-1 line-clamp-2">{addr.address_text}</p>
+                          <p className={`text-xs mt-1 line-clamp-2 ${isSelected ? 'text-slate-300' : 'text-slate-600'}`}>{addr.address_text}</p>
                           {addr.landmark && (
-                            <p className="text-slate-400 text-[11px] mt-0.5 flex items-center gap-1">
-                              <span className="text-slate-500 font-medium">Landmark:</span> {addr.landmark}
+                            <p className={`text-[11px] mt-0.5 flex items-center gap-1 ${isSelected ? 'text-slate-400' : 'text-slate-500'}`}>
+                              <span>Landmark:</span> {addr.landmark}
                             </p>
                           )}
                           {(addr.receiver_name || addr.receiver_phone) && (
-                            <p className="text-slate-400 text-[11px] mt-0.5 flex items-center gap-1">
-                              <User className="w-3 h-3 text-slate-500" />
+                            <p className={`text-[11px] mt-0.5 flex items-center gap-1 ${isSelected ? 'text-slate-400' : 'text-slate-500'}`}>
+                              <User className="w-3 h-3" />
                               <span>{addr.receiver_name || 'Receiver'}</span>
-                              {addr.receiver_phone && <span className="text-slate-500">({addr.receiver_phone})</span>}
+                              {addr.receiver_phone && <span>({addr.receiver_phone})</span>}
                             </p>
                           )}
                         </div>
@@ -302,7 +313,7 @@ export default function SavedAddressesModal({
                               type="button"
                               title="Set as Default Address"
                               onClick={(e) => handleSetDefault(e, addr.id)}
-                              className="p-1.5 rounded-lg text-slate-400 hover:text-amber-300 hover:bg-amber-500/10 transition-colors"
+                              className={`p-1.5 rounded-lg transition-colors ${isSelected ? 'text-slate-400 hover:text-white hover:bg-slate-800' : 'text-slate-400 hover:text-black hover:bg-slate-100'}`}
                             >
                               <Star className="w-4 h-4" />
                             </button>
@@ -311,7 +322,7 @@ export default function SavedAddressesModal({
                             type="button"
                             title="Delete Address"
                             onClick={(e) => handleDelete(e, addr.id)}
-                            className="p-1.5 rounded-lg text-slate-400 hover:text-rose-400 hover:bg-rose-500/10 transition-colors"
+                            className={`p-1.5 rounded-lg transition-colors ${isSelected ? 'text-slate-400 hover:text-rose-300 hover:bg-slate-800' : 'text-slate-400 hover:text-rose-600 hover:bg-rose-50'}`}
                           >
                             <Trash2 className="w-4 h-4" />
                           </button>
@@ -331,7 +342,7 @@ export default function SavedAddressesModal({
                     setReceiverPhone(currentUser?.phone || '');
                     setView('ADD');
                   }}
-                  className="w-full py-3 px-4 rounded-2xl border border-dashed border-slate-700 hover:border-rose-500/60 bg-slate-900/40 hover:bg-rose-950/20 text-rose-400 hover:text-rose-300 font-bold text-xs flex items-center justify-center gap-2 transition-all"
+                  className="w-full py-3 px-4 rounded-2xl border border-dashed border-slate-300 hover:border-black bg-slate-50 hover:bg-slate-100 text-slate-900 font-bold text-xs flex items-center justify-center gap-2 transition-all"
                 >
                   <Plus className="w-4 h-4" />
                   <span>+ Add New Address</span>
@@ -347,25 +358,25 @@ export default function SavedAddressesModal({
                   type="button"
                   onClick={handleDetectGPS}
                   disabled={detectingGps}
-                  className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
+                  className="py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 font-bold text-xs flex items-center justify-center gap-2 transition-all disabled:opacity-50"
                 >
-                  <Navigation className={`w-3.5 h-3.5 text-blue-400 ${detectingGps ? 'animate-spin' : ''}`} />
+                  <Navigation className={`w-3.5 h-3.5 text-black ${detectingGps ? 'animate-spin' : ''}`} />
                   <span>{detectingGps ? 'Detecting GPS...' : 'Use GPS Location'}</span>
                 </button>
 
                 <button
                   type="button"
                   onClick={() => setLocationPickerOpen(true)}
-                  className="py-2.5 px-3 rounded-xl bg-slate-800 hover:bg-slate-700 border border-slate-700 text-slate-200 font-bold text-xs flex items-center justify-center gap-2 transition-all"
+                  className="py-2.5 px-3 rounded-xl bg-slate-100 hover:bg-slate-200 border border-slate-300 text-slate-900 font-bold text-xs flex items-center justify-center gap-2 transition-all"
                 >
-                  <Compass className="w-3.5 h-3.5 text-amber-400" />
+                  <Compass className="w-3.5 h-3.5 text-black" />
                   <span>Browse Map / Presets</span>
                 </button>
               </div>
 
               {/* Address Label Selection */}
               <div>
-                <label className="block text-slate-300 text-xs font-semibold mb-1.5">Address Label</label>
+                <label className="block text-slate-700 text-xs font-semibold mb-1.5">Address Label</label>
                 <div className="grid grid-cols-4 gap-2">
                   {['Home', 'Work', 'Construction Site', 'Other'].map((lbl) => (
                     <button
@@ -374,8 +385,8 @@ export default function SavedAddressesModal({
                       onClick={() => setLabel(lbl)}
                       className={`py-2 px-2 rounded-xl border font-semibold text-xs flex flex-col items-center gap-1 transition-all ${
                         label === lbl
-                          ? 'bg-rose-600/20 border-rose-500 text-white shadow-md'
-                          : 'bg-slate-900 border-slate-800 text-slate-400 hover:bg-slate-850'
+                          ? 'bg-black border-black text-white shadow-md'
+                          : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                       }`}
                     >
                       {getLabelIcon(lbl)}
@@ -389,15 +400,15 @@ export default function SavedAddressesModal({
                     placeholder="Enter custom label (e.g. Warehouse, Farm)"
                     value={customLabelInput}
                     onChange={(e) => setCustomLabelInput(e.target.value)}
-                    className="mt-2 w-full py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-rose-500"
+                    className="mt-2 w-full py-2 px-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black"
                   />
                 )}
               </div>
 
               {/* Full Address Text */}
               <div>
-                <label className="block text-slate-300 text-xs font-semibold mb-1.5">
-                  Full Delivery Address <span className="text-rose-400">*</span>
+                <label className="block text-slate-700 text-xs font-semibold mb-1.5">
+                  Full Delivery Address <span className="text-black">*</span>
                 </label>
                 <textarea
                   rows={2}
@@ -405,67 +416,67 @@ export default function SavedAddressesModal({
                   placeholder="House/Flat No., Building, Street Name, Area, City, Pincode"
                   value={addressText}
                   onChange={(e) => setAddressText(e.target.value)}
-                  className="w-full py-2.5 px-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-rose-500 resize-none"
+                  className="w-full py-2.5 px-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black resize-none"
                 />
               </div>
 
               {/* Landmark */}
               <div>
-                <label className="block text-slate-300 text-xs font-semibold mb-1">Landmark (Optional)</label>
+                <label className="block text-slate-700 text-xs font-semibold mb-1">Landmark (Optional)</label>
                 <input
                   type="text"
                   placeholder="Near Bus Stop, Opposite Fuel Station, etc."
                   value={landmark}
                   onChange={(e) => setLandmark(e.target.value)}
-                  className="w-full py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-rose-500"
+                  className="w-full py-2 px-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black"
                 />
               </div>
 
               {/* Receiver Name & Phone */}
               <div className="grid grid-cols-2 gap-3">
                 <div>
-                  <label className="block text-slate-300 text-xs font-semibold mb-1">Receiver Name</label>
+                  <label className="block text-slate-700 text-xs font-semibold mb-1">Receiver Name</label>
                   <input
                     type="text"
                     placeholder="e.g. Vyshnavi"
                     value={receiverName}
                     onChange={(e) => setReceiverName(e.target.value)}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-rose-500"
+                    className="w-full py-2 px-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black"
                   />
                 </div>
                 <div>
-                  <label className="block text-slate-300 text-xs font-semibold mb-1">Receiver Phone</label>
+                  <label className="block text-slate-700 text-xs font-semibold mb-1">Receiver Phone</label>
                   <input
                     type="tel"
                     placeholder="e.g. +91 9876543210"
                     value={receiverPhone}
-                    onChange={(e) => setReceiverPhone(e.target.value)}
-                    className="w-full py-2 px-3 rounded-xl bg-slate-900 border border-slate-800 text-white text-xs focus:outline-none focus:border-rose-500"
+                    onChange={(e) => setReceiverPhone(sanitizePhoneInput(e.target.value))}
+                    className="w-full py-2 px-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black font-mono"
                   />
                 </div>
               </div>
 
               {/* Save Checkboxes */}
-              <div className="space-y-2 pt-1 border-t border-slate-800/80">
-                <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-xs">
+              <div className="space-y-2 pt-1 border-t border-slate-200">
+                <label className="flex items-center gap-2 cursor-pointer text-slate-700 text-xs">
                   <input
                     type="checkbox"
                     checked={saveForFuture}
                     onChange={(e) => setSaveForFuture(e.target.checked)}
-                    className="w-4 h-4 rounded bg-slate-900 border-slate-700 text-rose-600 focus:ring-rose-500"
+                    className="w-4 h-4 rounded bg-slate-100 border-slate-300 text-black focus:ring-black"
                   />
                   <span>Save this address to my profile for future orders</span>
                 </label>
 
                 {saveForFuture && (
-                  <label className="flex items-center gap-2 cursor-pointer text-slate-300 text-xs pl-6">
+                  <label className="flex items-center gap-2 cursor-pointer text-slate-700 text-xs pl-6">
                     <input
                       type="checkbox"
                       checked={isDefault}
                       onChange={(e) => setIsDefault(e.target.checked)}
-                      className="w-3.5 h-3.5 rounded bg-slate-900 border-slate-700 text-rose-600 focus:ring-rose-500"
+                      className="w-3.5 h-3.5 rounded bg-slate-100 border-slate-300 text-black focus:ring-black"
                     />
-                    <span className="text-slate-400">Set as my default delivery address</span>
+                    <span className="text-slate-600">Set as my default delivery address</span>
                   </label>
                 )}
               </div>
@@ -475,13 +486,13 @@ export default function SavedAddressesModal({
                 <button
                   type="button"
                   onClick={() => setView('LIST')}
-                  className="flex-1 py-3 px-4 rounded-xl border border-slate-700 text-slate-300 hover:bg-slate-800 font-bold text-xs transition-colors"
+                  className="flex-1 py-3 px-4 rounded-xl border border-slate-300 text-slate-700 hover:bg-slate-100 font-bold text-xs transition-colors"
                 >
                   Back to List
                 </button>
                 <button
                   type="submit"
-                  className="flex-1 py-3 px-4 rounded-xl bg-gradient-to-r from-rose-600 to-amber-600 hover:from-rose-500 hover:to-amber-500 text-white font-bold text-xs shadow-lg shadow-rose-600/25 transition-all"
+                  className="flex-1 py-3 px-4 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-xs shadow-md transition-all"
                 >
                   Use for This Order
                 </button>
@@ -497,7 +508,7 @@ export default function SavedAddressesModal({
       {inline ? (
         modalContent
       ) : (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-sm p-4 overflow-y-auto">
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-4 overflow-hidden">
           {modalContent}
         </div>
       )}

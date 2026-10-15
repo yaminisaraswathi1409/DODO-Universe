@@ -44,7 +44,9 @@ func main() {
 	if db != nil {
 		oppRepo = postgres.NewOpportunityRepository(db)
 		userRepo = postgres.NewUserRepository(db)
+		catalogRepo := postgres.NewCatalogRepository(db)
 		oppService = service.NewOpportunityService(oppRepo, userRepo, workflowRegistry)
+		oppService.SetCatalogRepository(catalogRepo)
 	}
 
 	eventBus := event.NewMemoryEventBus(1000)

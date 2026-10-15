@@ -61,6 +61,33 @@ export interface RequiredDocumentSpec {
   requires_admin_review?: boolean;
 }
 
+export interface ResourceFieldConfig {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'select' | 'date' | 'checkbox' | 'textarea';
+  required?: boolean;
+  placeholder?: string;
+  options?: string[];
+}
+
+export interface ResourceOptionConfig {
+  key: string;
+  label: string;
+  description?: string;
+}
+
+export interface ResourceConfig {
+  id?: string;
+  key: string;
+  name: string;
+  description?: string;
+  requirement_level: 'REQUIRED' | 'OPTIONAL' | 'NOT_APPLICABLE';
+  active: boolean;
+  display_order?: number;
+  options?: ResourceOptionConfig[];
+  fields?: ResourceFieldConfig[];
+}
+
 export interface Category {
   id: string;
   slug: string;
@@ -70,6 +97,11 @@ export interface Category {
   default_workflow: string;
   required_documents?: RequiredDocumentSpec[];
   opportunity_fields?: OpportunityFieldSpec[];
+  resources?: ResourceConfig[];
+  resource_requirements?: Record<string, string>;
+  vehicle_fields?: ResourceFieldConfig[];
+  driver_fields?: ResourceFieldConfig[];
+  related_services?: any[];
 }
 
 export interface UserServiceAsset {
@@ -87,8 +119,10 @@ export interface UserServiceAsset {
   status: 'PENDING_APPROVAL' | 'APPROVED' | 'DOCUMENTS_PENDING' | 'UNDER_REVIEW' | 'VERIFICATION_PENDING' | 'ACTIVE' | 'REJECTED' | 'SUSPENDED';
   rejection_reason?: string;
   documents?: Record<string, any>;
+  attributes?: Record<string, any>;
   created_at?: string;
   updated_at?: string;
+  [key: string]: any;
 }
 
 
@@ -96,9 +130,15 @@ export interface Opportunity {
   id: string;
   user_id: string;
   user?: UserProfile;
+  assigned_user_id?: string;
+  assigned_user?: UserProfile;
+  target_vendor_id?: string;
+  target_vendor?: UserProfile;
+  catalog_item_id?: string;
   category_id?: string;
   category?: Category;
   type: 'NEED' | 'OFFER';
+  order_mode?: string;
   title: string;
   description: string;
   workflow_model: string;
@@ -107,6 +147,9 @@ export interface Opportunity {
   lng: number;
   address_text?: string;
   radius_km: number;
+  quantity?: number;
+  unit_price?: number;
+  total_price?: number;
   budget_min?: number;
   budget_max?: number;
   price_unit?: string;
@@ -131,12 +174,12 @@ export interface SpatialMatch {
 }
 
 const FALLBACK_CATEGORIES: Category[] = [
-  { 
-    id: '7', 
-    slug: 'bricks-building-materials', 
-    name: 'Bricks & Building Materials', 
-    description: 'Red bricks, fly ash bricks, AAC blocks, sand, gravel', 
-    icon: 'Package', 
+  {
+    id: '7',
+    slug: 'bricks-building-materials',
+    name: 'Bricks & Building Materials',
+    description: 'Red bricks, fly ash bricks, AAC blocks, sand, gravel',
+    icon: 'Package',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'quantity', label: 'Quantity (Number of Bricks)', type: 'number', required: true, placeholder: 'e.g. 5000' },
@@ -145,12 +188,12 @@ const FALLBACK_CATEGORIES: Category[] = [
       { key: 'delivery_access', label: 'Site Access Type', type: 'select', required: false, options: ['10-Wheeler Truck Accessible', 'Tractor Access Only', 'Narrow Street / Manual Unload'] }
     ]
   },
-  { 
-    id: '8', 
-    slug: 'cement-construction', 
-    name: 'Cement & Construction Supplies', 
-    description: 'OPC, PPC, PSC cement bags, steel rebar, binding wire', 
-    icon: 'Layers', 
+  {
+    id: '8',
+    slug: 'cement-construction',
+    name: 'Cement & Construction Supplies',
+    description: 'OPC, PPC, PSC cement bags, steel rebar, binding wire',
+    icon: 'Layers',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'quantity_bags', label: 'Quantity (Bags)', type: 'number', required: true, placeholder: 'e.g. 100' },
@@ -159,12 +202,12 @@ const FALLBACK_CATEGORIES: Category[] = [
       { key: 'brand_preference', label: 'Brand Preference', type: 'select', required: false, options: ['UltraTech', 'Ambuja', 'ACC', 'Ramco', 'Chettinad', 'Any Quality Brand'] }
     ]
   },
-  { 
-    id: '9', 
-    slug: 'vehicle-repair', 
-    name: 'Vehicle Repair & Mechanics', 
-    description: 'Tractor, truck, auto, car repair, mobile mechanic', 
-    icon: 'Wrench', 
+  {
+    id: '9',
+    slug: 'vehicle-repair',
+    name: 'Vehicle Repair & Mechanics',
+    description: 'Tractor, truck, auto, car repair, mobile mechanic',
+    icon: 'Wrench',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'vehicle_type', label: 'Vehicle Category', type: 'select', required: true, options: ['Tractor', 'Commercial Truck', 'Auto Rickshaw', 'Four-Wheeler Car', 'Two-Wheeler Bike', 'Heavy Construction Equipment'] },
@@ -234,9 +277,9 @@ export async function getOpportunityByID(id: string): Promise<Opportunity | null
 export function getStoredAuthToken(): string {
   if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000001';
   try {
-    const directToken = localStorage.getItem('uop_token');
+    const directToken = localStorage.getItem('uop_token') || localStorage.getItem('uop_access_token');
     if (directToken && directToken.trim() !== '') return directToken;
-    const userStr = localStorage.getItem('uop_user');
+    const userStr = localStorage.getItem('uop_user') || localStorage.getItem('uop_user_profile');
     if (userStr) {
       const u = JSON.parse(userStr);
       if (u.token) return u.token;
@@ -268,7 +311,7 @@ export async function createOpportunity(payload: Partial<Opportunity>, jwtToken?
   return json.data;
 }
 
-export async function updateOpportunityStatus(id: string, status: string): Promise<Opportunity | null> {
+export async function updateOpportunityStatus(id: string, status: string, userId?: string, notes?: string): Promise<Opportunity | null> {
   const token = getStoredAuthToken();
   const headers: Record<string, string> = {
     'Content-Type': 'application/json',
@@ -279,12 +322,142 @@ export async function updateOpportunityStatus(id: string, status: string): Promi
   const res = await fetch(`${API_BASE_URL}/opportunities/${id}/status`, {
     method: 'POST',
     headers,
-    body: JSON.stringify({ status }),
+    body: JSON.stringify({ status, user_id: userId, notes }),
   });
   if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.data;
+  const data = await res.json();
+  return data.data;
 }
+
+export interface DeliveryCalculationResult {
+  is_eligible: boolean;
+  unit_price: number;
+  subtotal: number;
+  distance_km: number;
+  delivery_charge: number;
+  transport_charge: number;
+  driver_charge: number;
+  driver_included: boolean;
+  loading_charge: number;
+  unloading_charge: number;
+  service_fee: number;
+  total_charges: number;
+  final_payable: number;
+  rejection_reason?: string;
+  [key: string]: any;
+}
+
+export async function calculateDeliveryFee(req: any): Promise<DeliveryCalculationResult> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/logistics/calculate-delivery`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(req),
+    });
+    if (!res.ok) throw new Error(await res.text());
+    const json = await res.json();
+    return json.data;
+  } catch {
+    return {
+      is_eligible: true,
+      unit_price: req.unit_price || 0,
+      subtotal: (req.unit_price || 0) * (req.quantity || 1),
+      distance_km: 10,
+      delivery_charge: 50,
+      transport_charge: 0,
+      driver_charge: 0,
+      driver_included: true,
+      loading_charge: 0,
+      unloading_charge: 0,
+      service_fee: 20,
+      total_charges: 70,
+      final_payable: ((req.unit_price || 0) * (req.quantity || 1)) + 70,
+    };
+  }
+}
+
+export async function getMatchingOpportunities(userIdent: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/opportunities/matching?user_id=${userIdent}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getAcceptedOpportunities(userIdent: string): Promise<any> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/opportunities/accepted?user_id=${userIdent}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getCustomerOrders(userIdent: string): Promise<Opportunity[]> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/opportunities/my-orders?user_id=${encodeURIComponent(userIdent)}`, { headers, cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function verifyPharmacyPickup(oppIdOrData: any, data?: any): Promise<any> {
+  try {
+    const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
+    const res = await fetch(`${API_BASE_URL}/logistics/manifest/pickup-verify`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(bodyObj),
+    });
+    if (!res.ok) return false;
+    const json = await res.json();
+    return json.data || true;
+  } catch {
+    return false;
+  }
+}
+
+export async function confirmTransportResources(oppIdOrData: any, data?: any): Promise<any> {
+  const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
+  const targetId = typeof oppIdOrData === 'string' ? oppIdOrData : (oppIdOrData?.opportunity_id || '');
+  const token = getStoredAuthToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
+  const res = await fetch(`${API_BASE_URL}/opportunities/${targetId}/confirm-resources`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(bodyObj),
+  });
+  if (!res.ok) {
+    let errText = await res.text();
+    try {
+      const parsed = JSON.parse(errText);
+      errText = parsed.error || parsed.message || errText;
+    } catch {
+      // ignore
+    }
+    throw new Error(errText || 'Failed to confirm resource details');
+  }
+  const json = await res.json();
+  return json.data || true;
+}
+
 
 // PostGIS Proximity Spatial Matching
 export async function getSpatialMatches(oppID: string, jwtToken?: string): Promise<SpatialMatch[]> {
@@ -535,6 +708,17 @@ export async function updateCategoryOpportunityFields(categoryId: string, fields
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ opportunity_fields: fields }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function updateCategoryResources(categoryId: string, resources: ResourceConfig[]): Promise<Category | null> {
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${categoryId}/resources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resources }),
   });
   if (!res.ok) throw new Error(await res.text());
   const json = await res.json();
@@ -802,6 +986,339 @@ export async function deleteUserAddress(userId: string, addressId: string): Prom
   if (!res.ok) throw new Error(await res.text());
   return true;
 }
+
+export interface CategoryRelatedServiceSpec {
+  category_id: string;
+  name: string;
+  description?: string;
+  icon?: string;
+  is_required?: boolean;
+}
+
+export async function updateCategoryRelatedServices(
+  categoryId: string,
+  relatedServices: CategoryRelatedServiceSpec[]
+): Promise<Category> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${categoryId}/related-services`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ related_services: relatedServices }),
+  });
+  if (!res.ok) {
+    const errorData = await res.json().catch(() => ({}));
+    throw new Error(errorData.message || 'Failed to update category related services');
+  }
+  const data = await res.json();
+  return data.data;
+}
+
+export interface UserNotification {
+  id: string;
+  user_id: string;
+  title: string;
+  message: string;
+  type?: string;
+  metadata?: any;
+  is_read: boolean;
+  created_at: string;
+}
+
+export async function getUserNotifications(userIdent: string, page = 1, limit = 50): Promise<{ notifications: UserNotification[]; unread_count: number }> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const params = new URLSearchParams({ user_id: userIdent, page: page.toString(), limit: limit.toString() });
+    const res = await fetch(`${API_BASE_URL}/notifications?${params.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return { notifications: [], unread_count: 0 };
+    const json = await res.json();
+    return {
+      notifications: json.data?.notifications || json.data || [],
+      unread_count: json.data?.unread_count || 0,
+    };
+  } catch {
+    return { notifications: [], unread_count: 0 };
+  }
+}
+
+export async function getUnreadNotificationCount(userIdent: string): Promise<number> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const params = new URLSearchParams({ user_id: userIdent });
+    const res = await fetch(`${API_BASE_URL}/notifications/unread-count?${params.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return 0;
+    const json = await res.json();
+    return json.data?.unread_count || 0;
+  } catch {
+    return 0;
+  }
+}
+
+export async function markNotificationAsRead(id: string, userIdent?: string): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/${id}/read?user_id=${encodeURIComponent(userIdent || '')}`, {
+      method: 'POST',
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function markAllNotificationsAsRead(userIdent?: string): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/read-all?user_id=${encodeURIComponent(userIdent || '')}`, {
+      method: 'POST',
+      headers,
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export function getStoredUser(): UserProfile | null {
+  if (typeof window === 'undefined') return null;
+  const stored = localStorage.getItem('uop_user') || localStorage.getItem('uop_user_profile');
+  if (!stored) return null;
+  try {
+    return JSON.parse(stored);
+  } catch {
+    return null;
+  }
+}
+
+export function saveUserSession(user: UserProfile, token?: string): void {
+  if (typeof window === 'undefined') return;
+  const userJson = JSON.stringify(user);
+  localStorage.setItem('uop_user', userJson);
+  localStorage.setItem('uop_user_profile', userJson);
+  if (user.id) localStorage.setItem('uop_user_id', user.id);
+  if (user.phone) localStorage.setItem('uop_phone', user.phone);
+  if (token) {
+    localStorage.setItem('uop_token', token);
+    localStorage.setItem('uop_access_token', token);
+  }
+}
+
+export function clearUserSession(): void {
+  if (typeof window === 'undefined') return;
+  localStorage.removeItem('uop_user');
+  localStorage.removeItem('uop_user_profile');
+  localStorage.removeItem('uop_user_id');
+  localStorage.removeItem('uop_phone');
+  localStorage.removeItem('uop_token');
+  localStorage.removeItem('uop_access_token');
+}
+
+export interface VendorCatalogItem {
+  id: string;
+  vendor_asset_id?: string;
+  vendor_asset?: UserServiceAsset;
+  vendor_user_id: string;
+  vendor_user?: UserProfile;
+  category_id?: string;
+  category?: Category;
+  title: string;
+  description?: string;
+  sku?: string;
+  unit_price: number;
+  price_unit: string;
+  stock_quantity?: number;
+  min_order_quantity?: number;
+  images?: string[];
+  attributes?: Record<string, any>;
+  status?: 'PENDING_ADMIN_APPROVAL' | 'ACTIVE_IN_CATALOG' | 'APPROVED' | 'REJECTED';
+  rejection_reason?: string;
+  pickup_lat?: number;
+  pickup_lng?: number;
+  pickup_address?: string;
+  is_available: boolean;
+  created_at?: string;
+  updated_at?: string;
+  [key: string]: any;
+}
+
+export interface ProviderOffer {
+  id?: string;
+  offer_id?: string;
+  user_id?: string;
+  title: string;
+  description?: string;
+  pricing_model?: string;
+  unit_price?: number;
+  [key: string]: any;
+}
+
+export async function searchCatalog(query = '', categorySlug = '', page = 1, limit = 50): Promise<{ items: VendorCatalogItem[]; total: number }> {
+  try {
+    const params = new URLSearchParams();
+    if (query) params.append('q', query);
+    if (categorySlug && categorySlug !== 'ALL') params.append('category', categorySlug);
+    params.append('page', page.toString());
+    params.append('limit', limit.toString());
+
+    const res = await fetch(`${API_BASE_URL}/catalog/search?${params.toString()}`);
+    if (!res.ok) return { items: [], total: 0 };
+    const json = await res.json();
+    return {
+      items: json.data?.items || [],
+      total: json.data?.total || 0,
+    };
+  } catch {
+    return { items: [], total: 0 };
+  }
+}
+
+export async function getVendorCatalog(vendorId: string): Promise<{ vendor: UserProfile; assets: UserServiceAsset[]; items: VendorCatalogItem[] } | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/vendors/${vendorId}/catalog`);
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function createCatalogItem(item: Partial<VendorCatalogItem>): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to create catalog item');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function createVendorService(payload: any): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/services/create`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to create vendor service');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getAdminCatalogRequests(status = 'PENDING_ADMIN_APPROVAL'): Promise<VendorCatalogItem[]> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/admin/catalog/requests?status=${encodeURIComponent(status)}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function approveCatalogItem(id: string): Promise<VendorCatalogItem> {
+  const res = await fetch(`${API_BASE_URL}/admin/catalog/${id}/approve`, { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function rejectCatalogItem(id: string, rejectionReason: string): Promise<VendorCatalogItem> {
+  const res = await fetch(`${API_BASE_URL}/admin/catalog/${id}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rejection_reason: rejectionReason }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function verifyDeliveryOTP(opportunityId: string, otpCode: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/verify-delivery-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ otp_code: otpCode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Invalid delivery OTP code');
+  }
+  return true;
+}
+
+export async function updateCatalogItem(id: string, item: Partial<VendorCatalogItem>): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(item),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to update catalog item');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function deleteCatalogItem(id: string, vendorUserId: string): Promise<boolean> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}?vendor_user_id=${vendorUserId}`, {
+    method: 'DELETE',
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+  });
+  return res.ok;
+}
+
+export async function getProviderOffers(categoryId?: string): Promise<ProviderOffer[]> {
+  try {
+    const params = new URLSearchParams();
+    if (categoryId) params.append('category_id', categoryId);
+    const res = await fetch(`${API_BASE_URL}/provider/offers?${params.toString()}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+
 
 
 

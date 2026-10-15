@@ -5,6 +5,7 @@ import { useParams, useRouter } from 'next/navigation';
 import { getOpportunityByID, getOpportunityTree, Opportunity, OpportunityTreeNode } from '@/lib/api';
 import { CheckCircle2, Clock, MapPin, Phone, MessageSquare, Truck, ShieldCheck, Wrench, AlertTriangle, ArrowLeft, RefreshCw, User, Package, Calendar } from 'lucide-react';
 import Link from 'next/link';
+import OrderResourceArrangements from '@/components/OrderResourceArrangements';
 
 interface TimelineStep {
   id: string;
@@ -46,21 +47,21 @@ export default function CustomerOrderTrackingPage() {
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-[#090d16] text-white flex flex-col items-center justify-center p-6 space-y-4">
-        <RefreshCw className="w-10 h-10 animate-spin text-blue-500" />
-        <p className="text-sm font-semibold text-slate-400">Loading your order status live tracking...</p>
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col items-center justify-center p-6 space-y-4">
+        <RefreshCw className="w-10 h-10 animate-spin text-black" />
+        <p className="text-sm font-semibold text-slate-600">Loading your order status live tracking...</p>
       </div>
     );
   }
 
   if (error || !opp) {
     return (
-      <div className="min-h-screen bg-[#090d16] text-white flex flex-col items-center justify-center p-6 space-y-4">
-        <div className="p-6 rounded-2xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-center max-w-md space-y-3">
-          <AlertTriangle className="w-10 h-10 mx-auto" />
+      <div className="min-h-screen bg-slate-50 text-slate-900 flex flex-col items-center justify-center p-6 space-y-4">
+        <div className="p-6 rounded-2xl bg-rose-50 border border-rose-200 text-rose-700 text-center max-w-md space-y-3">
+          <AlertTriangle className="w-10 h-10 mx-auto text-rose-600" />
           <h2 className="text-lg font-bold">Order Not Found</h2>
-          <p className="text-xs text-slate-400">{error || 'The requested order details could not be retrieved.'}</p>
-          <Link href="/dashboard" className="inline-block px-5 py-2.5 rounded-xl bg-blue-600 text-white font-bold text-xs">
+          <p className="text-xs text-slate-600">{error || 'The requested order details could not be retrieved.'}</p>
+          <Link href="/dashboard" className="inline-block px-5 py-2.5 rounded-xl bg-black text-white font-bold text-xs hover:bg-slate-800 transition-all">
             Return to Dashboard
           </Link>
         </div>
@@ -71,7 +72,7 @@ export default function CustomerOrderTrackingPage() {
   const meta = opp.metadata || {};
   const isSomeoneElse = meta.for_someone_else;
   const recipient = meta.recipient_details;
-  const quantity = meta.quantity || meta.quantity_bags || meta.cargo_weight_tons || meta.farm_area_acres;
+  const quantity = opp.quantity ?? meta.quantity ?? meta.quantity_bags ?? meta.cargo_weight_tons ?? meta.farm_area_acres;
   const isTransportOrRepair = opp.category?.slug === 'logistics-transport' || opp.category?.slug === 'flatbed-transport' || opp.category?.slug === 'vehicle-repair' || opp.category?.slug === 'roadside-repair';
 
   // Check for Incident / Repair sub-tasks in tree internally without technical jargon
@@ -124,59 +125,63 @@ export default function CustomerOrderTrackingPage() {
   const timeline = getTimelineSteps();
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 p-4 sm:p-8">
+    <div className="min-h-screen bg-slate-50 text-slate-900 p-4 sm:p-8">
       <div className="max-w-3xl mx-auto space-y-6">
         {/* Header */}
         <div className="flex items-center justify-between">
           <button
             type="button"
             onClick={() => {
-              if (typeof window !== 'undefined' && window.history.length > 2) {
+              if (typeof window !== 'undefined' && window.history.length > 1) {
                 router.back();
               } else {
                 router.push('/dashboard');
               }
             }}
-            className="px-3.5 py-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-300 hover:text-white text-xs font-bold flex items-center gap-2 transition-all"
+            className="px-3.5 py-2 rounded-xl bg-white border border-slate-300 text-slate-800 hover:bg-slate-100 text-xs font-bold flex items-center gap-2 transition-all shadow-sm"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>Back to Dashboard</span>
+            <span>Back</span>
           </button>
           <span className="text-xs font-mono text-slate-500">Order ID: #{opp.id.slice(0, 8)}</span>
         </div>
 
         {/* Order Summary Hero Card */}
-        <div className="bg-[#0d1322] border border-slate-800 rounded-3xl p-6 shadow-2xl space-y-4 relative overflow-hidden">
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-md space-y-4 relative overflow-hidden">
           <div className="flex items-start justify-between">
             <div>
-              <span className="px-3 py-1 rounded-full bg-blue-500/15 text-blue-400 border border-blue-500/30 text-xs font-bold uppercase tracking-wider">
+              <span className="px-3 py-1 rounded-full bg-slate-100 text-slate-900 border border-slate-300 text-xs font-bold uppercase tracking-wider">
                 {opp.category?.name || meta.category_name || 'Service Order'}
               </span>
-              <h1 className="text-2xl font-extrabold text-white mt-2">{opp.title}</h1>
-              <p className="text-slate-400 text-xs mt-1">{opp.description}</p>
+              <h1 className="text-2xl font-black text-slate-900 mt-2">{opp.title}</h1>
+              <p className="text-slate-600 text-xs mt-1">{opp.description}</p>
             </div>
-            {opp.budget_max && (
-              <div className="text-right">
-                <span className="text-xs text-slate-400 block font-mono">Order Amount</span>
-                <span className="text-2xl font-extrabold text-emerald-400">₹{opp.budget_max}</span>
-              </div>
-            )}
+            {(() => {
+              const finalAmount = opp.total_price || opp.budget_max || meta.price_snapshot?.final_payable || meta.subtotal;
+              if (!finalAmount) return null;
+              return (
+                <div className="text-right">
+                  <span className="text-xs text-slate-500 block font-mono">Order Amount</span>
+                  <span className="text-2xl font-black text-slate-900">₹{Number(finalAmount).toLocaleString('en-IN')}</span>
+                </div>
+              );
+            })()}
           </div>
 
-          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-800/80 text-xs">
+          <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 pt-3 border-t border-slate-200 text-xs">
             {quantity && (
               <div>
                 <span className="text-slate-500 text-[11px] block">Quantity</span>
-                <span className="text-slate-200 font-bold">{quantity} Units</span>
+                <span className="text-slate-900 font-bold">{quantity} {opp.price_unit ? opp.price_unit.replace('PER_', '').toLowerCase() : 'Units'}</span>
               </div>
             )}
             <div>
               <span className="text-slate-500 text-[11px] block">Order Status</span>
-              <span className="text-blue-400 font-bold uppercase">{opp.status}</span>
+              <span className="text-black font-bold uppercase">{opp.status}</span>
             </div>
             <div>
               <span className="text-slate-500 text-[11px] block">Estimated Delivery</span>
-              <span className="text-slate-200 font-semibold">{opp.scheduled_start ? new Date(opp.scheduled_start).toLocaleDateString() : 'Within 2 Hours'}</span>
+              <span className="text-slate-900 font-semibold">{opp.scheduled_start ? new Date(opp.scheduled_start).toLocaleDateString() : 'Within 2 Hours'}</span>
             </div>
           </div>
         </div>
@@ -184,82 +189,97 @@ export default function CustomerOrderTrackingPage() {
         {/* Delivery Address & Recipient Card */}
         <div className="grid sm:grid-cols-2 gap-4">
           {/* Delivery Location */}
-          <div className="bg-[#0d1322] border border-slate-800 rounded-2xl p-5 space-y-2">
-            <span className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
-              <MapPin className="w-4 h-4 text-rose-400" />
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-2 shadow-sm">
+            <span className="text-xs font-bold uppercase text-slate-500 tracking-wider flex items-center gap-1.5">
+              <MapPin className="w-4 h-4 text-black" />
               <span>Delivery / Service Address</span>
             </span>
-            <p className="text-slate-200 text-sm font-medium">{opp.address_text || 'Choutuppal, Telangana'}</p>
+            <p className="text-slate-900 text-sm font-medium">{opp.address_text || 'Choutuppal, Telangana'}</p>
           </div>
 
           {/* Recipient Details */}
-          <div className="bg-[#0d1322] border border-slate-800 rounded-2xl p-5 space-y-2">
-            <span className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
-              <User className="w-4 h-4 text-purple-400" />
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-2 shadow-sm">
+            <span className="text-xs font-bold uppercase text-slate-500 tracking-wider flex items-center gap-1.5">
+              <User className="w-4 h-4 text-black" />
               <span>{isSomeoneElse ? 'Recipient Details' : 'Customer Profile'}</span>
             </span>
             {isSomeoneElse && recipient ? (
               <div>
-                <div className="text-slate-200 text-sm font-bold">{recipient.recipientName}</div>
-                <div className="text-slate-400 text-xs">{recipient.recipientPhone}</div>
-                {recipient.instructions && <div className="text-slate-500 text-xs italic mt-1 font-mono">"{recipient.instructions}"</div>}
+                <div className="text-slate-900 text-sm font-bold">{recipient.recipientName}</div>
+                <div className="text-slate-600 text-xs">{recipient.recipientPhone}</div>
+                {recipient.instructions && <div className="text-slate-500 text-xs italic mt-1 font-mono">&quot;{recipient.instructions}&quot;</div>}
               </div>
             ) : (
               <div>
-                <div className="text-slate-200 text-sm font-bold">Ordered For Myself</div>
-                <div className="text-slate-400 text-xs">Logged-in Customer Account</div>
+                <div className="text-slate-900 text-sm font-bold">Ordered For Myself</div>
+                <div className="text-slate-500 text-xs">Logged-in Customer Account</div>
               </div>
             )}
           </div>
         </div>
 
         {/* Accepted Provider Profile & Direct Contact Buttons */}
-        {opp.status !== 'OPEN' && (
-          <div className="bg-gradient-to-r from-emerald-950/30 via-slate-900 to-teal-950/30 border border-emerald-500/30 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4">
-            <div className="flex items-center gap-3 text-center sm:text-left">
-              <div className="w-12 h-12 rounded-full bg-emerald-600/20 border border-emerald-500/40 flex items-center justify-center text-emerald-400 font-bold text-lg flex-shrink-0">
-                <ShieldCheck className="w-6 h-6" />
-              </div>
-              <div>
-                <span className="text-[10px] font-extrabold uppercase tracking-wider text-emerald-400">Assigned Provider</span>
-                <h3 className="text-base font-extrabold text-white">Choutuppal Logistics & Mechanics Partner</h3>
-                <div className="text-xs text-slate-400 flex items-center gap-2 justify-center sm:justify-start mt-0.5">
-                  <span className="text-amber-400 font-bold">★ 4.9 Trust Rating</span>
-                  <span>• Verified Partner</span>
+        {opp.status !== 'OPEN' && (() => {
+          const assignedProvider = opp.assigned_user || opp.target_vendor;
+          const providerName = assignedProvider?.full_name || 'Verified Service Provider';
+          const providerPhone = assignedProvider?.phone || '';
+
+          return (
+            <div className="bg-white border border-slate-300 rounded-2xl p-5 flex flex-col sm:flex-row items-center justify-between gap-4 shadow-sm">
+              <div className="flex items-center gap-3 text-center sm:text-left">
+                <div className="w-12 h-12 rounded-full bg-slate-100 border border-slate-300 flex items-center justify-center text-black font-bold text-lg flex-shrink-0">
+                  <ShieldCheck className="w-6 h-6 text-black" />
+                </div>
+                <div>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-900">Assigned Provider</span>
+                  <h3 className="text-base font-black text-slate-900">{providerName}</h3>
+                  <div className="text-xs text-slate-600 flex items-center gap-2 justify-center sm:justify-start mt-0.5">
+                    <span className="text-slate-900 font-bold">★ 4.9 Rating</span>
+                    <span>• Verified Partner</span>
+                  </div>
                 </div>
               </div>
-            </div>
 
-            <div className="flex items-center gap-2 w-full sm:w-auto">
-              <a
-                href="tel:+919876543210"
-                className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-lg shadow-emerald-600/20 transition-all"
-              >
-                <Phone className="w-4 h-4" />
-                <span>Call Provider</span>
-              </a>
-              <a
-                href="sms:+919876543210"
-                className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
-              >
-                <MessageSquare className="w-4 h-4" />
-                <span>Message</span>
-              </a>
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                {providerPhone ? (
+                  <>
+                    <a
+                      href={`tel:${providerPhone}`}
+                      className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-all"
+                    >
+                      <Phone className="w-4 h-4" />
+                      <span>Call Provider</span>
+                    </a>
+                    <a
+                      href={`sms:${providerPhone}`}
+                      className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-slate-100 border border-slate-300 text-slate-900 hover:bg-slate-200 text-xs font-bold flex items-center justify-center gap-1.5 transition-all"
+                    >
+                      <MessageSquare className="w-4 h-4" />
+                      <span>Message</span>
+                    </a>
+                  </>
+                ) : (
+                  <span className="text-xs text-slate-500 font-medium">Provider Contact Connected</span>
+                )}
+              </div>
             </div>
-          </div>
-        )}
+          );
+        })()}
+
+        {/* Dynamic Resource & Logistics Arrangements (Supports all Main Services) */}
+        <OrderResourceArrangements opp={opp} />
 
         {/* Visual Progress Timeline */}
-        <div className="bg-[#0d1322] border border-slate-800 rounded-3xl p-6 sm:p-7 space-y-6">
+        <div className="bg-white border border-slate-200 rounded-3xl p-6 sm:p-7 space-y-6 shadow-md">
           <div>
-            <h3 className="text-lg font-bold text-white flex items-center gap-2">
-              <Clock className="w-5 h-5 text-blue-400" />
+            <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
+              <Clock className="w-5 h-5 text-black" />
               <span>Live Order Progress Timeline</span>
             </h3>
-            <p className="text-slate-400 text-xs">Real-time status updates powered by PostGIS matching engine.</p>
+            <p className="text-slate-600 text-xs">Real-time status updates powered by PostGIS matching engine.</p>
           </div>
 
-          <div className="relative pl-6 border-l-2 border-slate-800 space-y-6">
+          <div className="relative pl-6 border-l-2 border-slate-200 space-y-6">
             {timeline.map((stepItem, idx) => {
               const isCompleted = stepItem.status === 'completed';
               const isCurrent = stepItem.status === 'current';
@@ -271,12 +291,12 @@ export default function CustomerOrderTrackingPage() {
                   <div
                     className={`absolute -left-[31px] top-0 w-6 h-6 rounded-full flex items-center justify-center text-xs font-bold transition-all ${
                       isCompleted
-                        ? 'bg-emerald-500 text-white ring-4 ring-emerald-500/20'
+                        ? 'bg-black text-white ring-4 ring-slate-200'
                         : isCurrent
-                        ? 'bg-blue-500 text-white ring-4 ring-blue-500/30 animate-pulse'
+                        ? 'bg-slate-900 text-white ring-4 ring-slate-300 animate-pulse'
                         : isWarning
-                        ? 'bg-amber-500 text-white ring-4 ring-amber-500/30'
-                        : 'bg-slate-800 text-slate-500 border border-slate-700'
+                        ? 'bg-amber-500 text-white ring-4 ring-amber-100'
+                        : 'bg-slate-100 text-slate-400 border border-slate-300'
                     }`}
                   >
                     {isCompleted ? (
@@ -293,12 +313,12 @@ export default function CustomerOrderTrackingPage() {
                     <h4
                       className={`text-sm font-bold ${
                         isCompleted
-                          ? 'text-emerald-400'
+                          ? 'text-black'
                           : isCurrent
-                          ? 'text-blue-400'
+                          ? 'text-slate-900'
                           : isWarning
-                          ? 'text-amber-400 font-extrabold'
-                          : 'text-slate-500'
+                          ? 'text-amber-600 font-black'
+                          : 'text-slate-400'
                       }`}
                     >
                       {stepItem.label}
