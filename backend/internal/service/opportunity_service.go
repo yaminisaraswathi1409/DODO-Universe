@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -18,16 +19,15 @@ type subRepoInterface interface {
 	ValidateAndIncrementSubscription(ctx context.Context, userID uuid.UUID, role string) (any, error)
 }
 
-type catalogItemAttrHolder struct {
-	Attributes json.RawMessage
-}
-
 type catalogRepoInterface interface {
-	GetCatalogItemByID(ctx context.Context, id uuid.UUID) (*catalogItemAttrHolder, error)
+	GetCatalogItemByID(ctx context.Context, id uuid.UUID) (*domain.VendorCatalogItem, error)
 }
 
 type logisticsFeeCalculator interface {
 	CalculateDeliveryFee(ctx context.Context, req *domain.DeliveryCalculationRequest) (*domain.DeliveryCalculationResult, error)
+	HoldCatalogEscrow(ctx context.Context, oppID, payerID, payeeID uuid.UUID, amount float64, escrowType string) error
+	SpawnTransportCascade(ctx context.Context, rootOppID uuid.UUID, parentUserID uuid.UUID, lat, lng float64) (*domain.Opportunity, error)
+	SpawnUnloadingCascade(ctx context.Context, rootOppID uuid.UUID, parentUserID uuid.UUID, lat, lng float64) (*domain.Opportunity, error)
 }
 
 type OpportunityService struct {
@@ -96,10 +96,33 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 		opp.RadiusKM = 25.0 // default 25km radius
 	}
 
+	// Auto-resolve category ID from metadata if opp.CategoryID is nil
+	if opp.CategoryID == nil && len(opp.Metadata) > 0 {
+		var m map[string]interface{}
+		if json.Unmarshal(opp.Metadata, &m) == nil {
+			if slug, ok := m["category_slug"].(string); ok && slug != "" {
+				if cat, err := s.oppRepo.GetCategoryBySlugOrName(ctx, slug); err == nil && cat != nil {
+					opp.CategoryID = &cat.ID
+				}
+			} else if name, ok := m["category_name"].(string); ok && name != "" {
+				if cat, err := s.oppRepo.GetCategoryBySlugOrName(ctx, name); err == nil && cat != nil {
+					opp.CategoryID = &cat.ID
+				}
+			} else if cidStr, ok := m["category_id"].(string); ok && cidStr != "" {
+				if cid, err := uuid.Parse(cidStr); err == nil {
+					opp.CategoryID = &cid
+				} else if cat, err := s.oppRepo.GetCategoryBySlugOrName(ctx, cidStr); err == nil && cat != nil {
+					opp.CategoryID = &cat.ID
+				}
+			}
+		}
+	}
+
 	// Dynamic Category Validation based on DB Category configuration
 	if opp.CategoryID != nil {
 		cat, catErr := s.oppRepo.GetCategoryByID(ctx, *opp.CategoryID)
 		if catErr == nil && cat != nil {
+			opp.Category = cat
 			var meta map[string]interface{}
 			if len(opp.Metadata) > 0 {
 				_ = json.Unmarshal(opp.Metadata, &meta)
@@ -107,13 +130,51 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 			if meta == nil {
 				meta = make(map[string]interface{})
 			}
+			if opp.Quantity == nil || *opp.Quantity <= 0 {
+				if qVal, exists := meta["quantity"]; exists && qVal != nil {
+					switch v := qVal.(type) {
+					case float64:
+						opp.Quantity = &v
+					case int:
+						f := float64(v)
+						opp.Quantity = &f
+					case string:
+						if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+							opp.Quantity = &f
+						}
+					}
+				} else if qbVal, exists := meta["quantity_needed"]; exists && qbVal != nil {
+					switch v := qbVal.(type) {
+					case float64:
+						opp.Quantity = &v
+					case int:
+						f := float64(v)
+						opp.Quantity = &f
+					case string:
+						if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+							opp.Quantity = &f
+						}
+					}
+				} else if cf, ok := meta["custom_fields"].(map[string]interface{}); ok && cf != nil {
+					if cfQ, exists := cf["quantity"]; exists && cfQ != nil {
+						switch v := cfQ.(type) {
+						case float64:
+							opp.Quantity = &v
+						case int:
+							f := float64(v)
+							opp.Quantity = &f
+						case string:
+							if f, err := strconv.ParseFloat(v, 64); err == nil && f > 0 {
+								opp.Quantity = &f
+							}
+						}
+					}
+				}
+			}
+
 			if opp.Quantity != nil && *opp.Quantity > 0 {
-				if _, exists := meta["quantity"]; !exists {
-					meta["quantity"] = *opp.Quantity
-				}
-				if _, exists := meta["quantity_needed"]; !exists {
-					meta["quantity_needed"] = *opp.Quantity
-				}
+				meta["quantity"] = *opp.Quantity
+				meta["quantity_needed"] = *opp.Quantity
 			}
 
 			// 1. Validate Dynamic Opportunity Fields
@@ -169,6 +230,15 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 						val, exists := meta[f.Key]
 						hasVal := exists && val != nil && fmt.Sprintf("%v", val) != ""
 
+						if !hasVal {
+							if cf, ok := meta["custom_fields"].(map[string]interface{}); ok && cf != nil {
+								if cfVal, cfExists := cf[f.Key]; cfExists && cfVal != nil && fmt.Sprintf("%v", cfVal) != "" {
+									meta[f.Key] = cfVal
+									hasVal = true
+								}
+							}
+						}
+
 						if !hasVal && len(candidateCatalogItemIDs) > 0 {
 							for _, cID := range candidateCatalogItemIDs {
 								itemAttrs := getCatItemAttr(cID)
@@ -217,6 +287,25 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 						if vOpt == "" {
 							vOpt, _ = meta["resource_" + res.Key].(string)
 						}
+						if vOpt == "" && res.Name != "" {
+							vOpt, _ = meta[strings.ToLower(strings.ReplaceAll(res.Name, " ", "_")) + "_option"].(string)
+						}
+						if vOpt == "" {
+							if resMap, ok := meta["resource_selections"].(map[string]interface{}); ok {
+								if rSel, exists := resMap[res.Key].(map[string]interface{}); exists {
+									if ch, _ := rSel["choice"].(string); ch != "" {
+										vOpt = ch
+									}
+								}
+								if vOpt == "" && res.Name != "" {
+									if rSel, exists := resMap[strings.ToLower(strings.ReplaceAll(res.Name, " ", "_"))].(map[string]interface{}); exists {
+										if ch, _ := rSel["choice"].(string); ch != "" {
+											vOpt = ch
+										}
+									}
+								}
+							}
+						}
 						if vOpt == "" {
 							return nil, fmt.Errorf("required resource '%s' selection is missing for %s", res.Name, cat.Name)
 						}
@@ -243,11 +332,25 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 		}
 	}
 
-	// Direct Catalog Orders or Multi-Brand Cart Orders: Authoritative backend price resolution & status handling
-	if opp.OrderMode == domain.OrderModeCatalog {
+	if opp.OrderMode == domain.OrderModeCatalog || opp.OrderMode == "CATALOG" || opp.CatalogItemID != nil {
+		opp.OrderMode = domain.OrderModeCatalog
 		opp.Status = domain.StatusOrderPlaced
 		if opp.TargetVendorID != nil {
 			opp.AssignedUserID = opp.TargetVendorID
+		}
+
+		// Enforce Backend Minimum Order Quantity (MOQ) rule for Catalog Purchases
+		if s.catalogRepo != nil && opp.CatalogItemID != nil && *opp.CatalogItemID != uuid.Nil {
+			item, cErr := s.catalogRepo.GetCatalogItemByID(ctx, *opp.CatalogItemID)
+			if cErr == nil && item != nil && item.MinOrderQuantity > 1 {
+				reqQty := 1.0
+				if opp.Quantity != nil && *opp.Quantity > 0 {
+					reqQty = *opp.Quantity
+				}
+				if reqQty < float64(item.MinOrderQuantity) {
+					return nil, fmt.Errorf("cannot place catalog order: requested quantity (%.0f) is below vendor's minimum order quantity (%d). Please use 'Request What You Need' for custom quantities.", reqQty, item.MinOrderQuantity)
+				}
+			}
 		}
 
 		if (opp.CatalogItemID != nil || opp.TargetVendorID != nil) && s.logisticsRepo != nil {
@@ -281,6 +384,11 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 			}
 
 			calcRes, calcErr := s.logisticsRepo.CalculateDeliveryFee(ctx, calcReq)
+			if calcErr != nil {
+				fmt.Printf("[DEBUG CreateOpportunity] CalculateDeliveryFee Error: %v\n", calcErr)
+			} else if calcRes != nil {
+				fmt.Printf("[DEBUG CreateOpportunity] CalculateDeliveryFee Success! UnitPrice: ₹%.2f, FinalPayable: ₹%.2f\n", calcRes.UnitPrice, calcRes.FinalPayable)
+			}
 			if calcErr == nil && calcRes != nil {
 				if !calcRes.IsEligible {
 					return nil, fmt.Errorf("cannot place catalog order: %s", calcRes.RejectionReason)
@@ -378,6 +486,20 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 		return nil, err
 	}
 
+	if created.OrderMode == domain.OrderModeCatalog && s.logisticsRepo != nil {
+		payeeID := uuid.Nil
+		if created.TargetVendorID != nil {
+			payeeID = *created.TargetVendorID
+		}
+		amt := 0.0
+		if created.TotalPrice != nil {
+			amt = *created.TotalPrice
+		}
+		if amt > 0 {
+			_ = s.logisticsRepo.HoldCatalogEscrow(ctx, created.ID, created.UserID, payeeID, amt, "BRICK_PURCHASE")
+		}
+	}
+
 	// Process Multi-Brand Cart Order Separation (Parent -> Brand Sub-Orders)
 	var createdMeta map[string]interface{}
 	if len(created.Metadata) > 0 {
@@ -392,7 +514,7 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 			}
 		}
 
-		if len(rawGroups) > 0 {
+		if len(rawGroups) > 1 {
 			for _, gRaw := range rawGroups {
 				gMap, ok := gRaw.(map[string]interface{})
 				if !ok {
@@ -493,6 +615,9 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 					Lng:                 created.Lng,
 					AddressText:         created.AddressText,
 					RadiusKM:            created.RadiusKM,
+					ScheduledStart:      created.ScheduledStart,
+					ScheduledEnd:        created.ScheduledEnd,
+					PriceUnit:           created.PriceUnit,
 					Quantity:            &qty,
 					UnitPrice:           &groupSubtotal,
 					TotalPrice:          &groupSubtotal,
@@ -572,10 +697,12 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 	// Trigger Provider Matching & Structured Notifications (Skip for Direct Catalog Orders)
 	if created.Type == domain.TypeNeed && created.CategoryID != nil && created.OrderMode != domain.OrderModeCatalog {
 		providers, _ := s.oppRepo.FindEligibleProvidersForCategory(ctx, created.CategoryID)
+		matchedCount := 0
 		for _, p := range providers {
 			if p.ID == created.UserID {
 				continue
 			}
+			matchedCount++
 
 			// Record match linkage
 			_ = s.oppRepo.SaveOpportunityMatch(ctx, created.ID, p.ID, "NOTIFIED")
@@ -599,6 +726,8 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 				quantityStr = fmt.Sprintf("%v units", q)
 			} else if qb, ok := meta["quantity_bags"]; ok && qb != nil {
 				quantityStr = fmt.Sprintf("%v bags", qb)
+			} else if created.Quantity != nil && *created.Quantity > 0 {
+				quantityStr = fmt.Sprintf("%v units", *created.Quantity)
 			}
 
 			pickupStr := created.AddressText
@@ -644,6 +773,48 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 				Metadata: notifMeta,
 			})
 		}
+
+		// Update opportunity metadata with distribution status and eligible count
+		var finalMeta map[string]interface{}
+		if len(created.Metadata) > 0 {
+			_ = json.Unmarshal(created.Metadata, &finalMeta)
+		}
+		if finalMeta == nil {
+			finalMeta = make(map[string]interface{})
+		}
+		finalMeta["eligible_vendor_count"] = matchedCount
+		if matchedCount > 0 {
+			finalMeta["distribution_status"] = "DISTRIBUTED"
+		} else {
+			finalMeta["distribution_status"] = "PENDING_VENDORS"
+		}
+		finalMetaBytes, _ := json.Marshal(finalMeta)
+		created.Metadata = finalMetaBytes
+		_ = s.oppRepo.UpdateMetadata(ctx, created.ID, finalMetaBytes)
+
+		// Accurate customer notification based on whether eligible vendors were reached
+		if created.UserID != uuid.Nil {
+			var custMsg string
+			if matchedCount > 0 {
+				custMsg = fmt.Sprintf("Your request \"%s\" has been sent to %d eligible vendor(s) in your area.", created.Title, matchedCount)
+			} else {
+				custMsg = fmt.Sprintf("Your request \"%s\" has been saved and is awaiting eligible vendors in your area.", created.Title)
+			}
+			cNotifMeta, _ := json.Marshal(map[string]interface{}{
+				"opportunity_id":        created.ID,
+				"title":                 created.Title,
+				"eligible_vendor_count": matchedCount,
+				"status":                string(created.Status),
+				"type":                  "REQUEST_DISTRIBUTED",
+			})
+			_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+				UserID:   created.UserID,
+				Title:    "Request Update",
+				Message:  custMsg,
+				Type:     "REQUEST_DISTRIBUTED",
+				Metadata: cNotifMeta,
+			})
+		}
 	}
 
 	return created, nil
@@ -651,6 +822,10 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 
 func (s *OpportunityService) GetOpportunity(ctx context.Context, id uuid.UUID) (*domain.Opportunity, error) {
 	return s.oppRepo.GetByID(ctx, id)
+}
+
+func (s *OpportunityService) GetCategoryBySlugOrName(ctx context.Context, identifier string) (*domain.Category, error) {
+	return s.oppRepo.GetCategoryBySlugOrName(ctx, identifier)
 }
 
 func (s *OpportunityService) MatchOpportunity(ctx context.Context, oppID uuid.UUID) ([]*domain.OpportunityMatch, error) {
@@ -745,6 +920,12 @@ func (s *OpportunityService) NotifyOrderStatusChange(ctx context.Context, oppID 
 	case domain.StatusCompleted:
 		title = "Order Completed"
 		msg = fmt.Sprintf("Order \"%s\" completed. Thank you!", opp.Title)
+	case domain.StatusCancelled:
+		title = "Order Cancelled"
+		msg = fmt.Sprintf("Your order \"%s\" has been cancelled.", opp.Title)
+	case domain.StatusRejected:
+		title = "Order Declined"
+		msg = fmt.Sprintf("Your order \"%s\" was declined by the provider.", opp.Title)
 	default:
 		title = fmt.Sprintf("Order Status Updated: %s", status)
 		msg = fmt.Sprintf("Your order \"%s\" status changed to %s.", opp.Title, status)
@@ -886,6 +1067,18 @@ func (s *OpportunityService) AcceptOpportunity(ctx context.Context, oppID uuid.U
 		return err
 	}
 
+	if s.logisticsRepo != nil && len(opp.Metadata) > 0 {
+		var meta map[string]interface{}
+		if json.Unmarshal(opp.Metadata, &meta) == nil {
+			if hasTrans, ok := meta["has_transport"].(bool); ok && hasTrans {
+				_, _ = s.logisticsRepo.SpawnTransportCascade(ctx, oppID, providerUserID, opp.Lat, opp.Lng)
+			}
+			if hasUnload, ok := meta["has_unloading"].(bool); ok && hasUnload {
+				_, _ = s.logisticsRepo.SpawnUnloadingCascade(ctx, oppID, providerUserID, opp.Lat, opp.Lng)
+			}
+		}
+	}
+
 	// Create customer notification
 	provider, _ := s.userRepo.GetByID(ctx, providerUserID)
 	providerName := "A verified provider"
@@ -949,4 +1142,228 @@ func (s *OpportunityService) FindCommuterRouteMatches(ctx context.Context, needI
 
 func (s *OpportunityService) GetStatusHistory(ctx context.Context, id uuid.UUID) ([]*domain.OpportunityStatusHistory, error) {
 	return s.oppRepo.GetStatusHistory(ctx, id)
+}
+
+type ConfirmResourcesParams struct {
+	OpportunityID   uuid.UUID
+	CallerIdent     string
+	Vehicle         map[string]interface{}
+	Driver          map[string]interface{}
+	ResourceKey     string
+	ResourceDetails map[string]interface{}
+	Resources       map[string]interface{}
+}
+
+func (s *OpportunityService) ConfirmResources(ctx context.Context, params ConfirmResourcesParams) (*domain.Opportunity, error) {
+	opp, err := s.oppRepo.GetByID(ctx, params.OpportunityID)
+	if err != nil || opp == nil {
+		return nil, fmt.Errorf("opportunity not found: %w", err)
+	}
+
+	fmt.Printf("[DEBUG ConfirmResources] oppID: %s, callerIdent: %s\n", opp.ID, params.CallerIdent)
+
+	if params.CallerIdent != "" {
+		var callerUser *domain.User
+		if cUID, parseErr := uuid.Parse(params.CallerIdent); parseErr == nil {
+			callerUser, _ = s.userRepo.GetByID(ctx, cUID)
+		} else {
+			callerUser, _ = s.userRepo.GetByPhone(ctx, params.CallerIdent)
+		}
+		if callerUser == nil {
+			callerUser, _ = s.userRepo.GetBySupabaseUID(ctx, params.CallerIdent)
+		}
+
+		if callerUser == nil {
+			return nil, fmt.Errorf("unauthorized: caller %s not found or unrecognized", params.CallerIdent)
+		}
+
+		isAuthorized := false
+		if callerUser.Role == domain.RoleAdmin || callerUser.Role == domain.RoleSuperAdmin {
+			isAuthorized = true
+		} else if opp.AssignedUserID != nil && *opp.AssignedUserID == callerUser.ID {
+			isAuthorized = true
+		} else if opp.TargetVendorID != nil && *opp.TargetVendorID == callerUser.ID {
+			isAuthorized = true
+		} else if opp.UserID == callerUser.ID {
+			isAuthorized = true
+		}
+
+		if !isAuthorized {
+			return nil, fmt.Errorf("unauthorized: user %s is not permitted to edit resource arrangements for order %s", callerUser.ID, opp.ID)
+		}
+	} else {
+		return nil, fmt.Errorf("unauthorized: caller identification required")
+	}
+
+	var meta map[string]interface{}
+	if len(opp.Metadata) > 0 {
+		_ = json.Unmarshal(opp.Metadata, &meta)
+	}
+	if meta == nil {
+		meta = make(map[string]interface{})
+	}
+
+	vendorResDetails, _ := meta["vendor_resource_details"].(map[string]interface{})
+	if vendorResDetails == nil {
+		vendorResDetails = make(map[string]interface{})
+	}
+
+	resSelections, _ := meta["resource_selections"].(map[string]interface{})
+	if resSelections == nil {
+		resSelections = make(map[string]interface{})
+	}
+
+	updatedLabels := []string{}
+
+	// 1. Vehicle / Transport details
+	if params.Vehicle != nil && len(params.Vehicle) > 0 {
+		if rawPhone, ok := params.Vehicle["contact_number"].(string); ok && rawPhone != "" {
+			norm, pErr := postgres.ValidateAndNormalizePhone(rawPhone)
+			if pErr != nil {
+				return nil, fmt.Errorf("invalid vehicle contact phone: %w", pErr)
+			}
+			params.Vehicle["contact_number"] = norm
+		}
+
+		vendorResDetails["vehicle"] = map[string]interface{}{
+			"resource_key":  "vehicle",
+			"resource_name": "Transportation / Vehicle",
+			"status":        "ARRANGED",
+			"details":       params.Vehicle,
+			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+		}
+
+		vSel, _ := resSelections["vehicle"].(map[string]interface{})
+		if vSel == nil {
+			vSel = map[string]interface{}{
+				"resource_key":  "vehicle",
+				"resource_name": "Transportation / Vehicle",
+				"choice":        "NEED_VEHICLE",
+			}
+		}
+		vSel["vendor_details"] = params.Vehicle
+		vSel["arranged"] = true
+		vSel["status"] = "ARRANGED"
+		resSelections["vehicle"] = vSel
+
+		meta["vendor_vehicle_details"] = params.Vehicle
+		updatedLabels = append(updatedLabels, "vehicle/transport")
+	}
+
+	// 2. Driver details
+	if params.Driver != nil && len(params.Driver) > 0 {
+		if rawPhone, ok := params.Driver["driver_phone"].(string); ok && rawPhone != "" {
+			norm, pErr := postgres.ValidateAndNormalizePhone(rawPhone)
+			if pErr != nil {
+				return nil, fmt.Errorf("invalid driver phone: %w", pErr)
+			}
+			params.Driver["driver_phone"] = norm
+		}
+
+		vendorResDetails["driver"] = map[string]interface{}{
+			"resource_key":  "driver",
+			"resource_name": "Driver",
+			"status":        "ARRANGED",
+			"details":       params.Driver,
+			"updated_at":    time.Now().UTC().Format(time.RFC3339),
+		}
+
+		dSel, _ := resSelections["driver"].(map[string]interface{})
+		if dSel == nil {
+			dSel = map[string]interface{}{
+				"resource_key":  "driver",
+				"resource_name": "Driver",
+				"choice":        "NEED_DRIVER",
+			}
+		}
+		dSel["vendor_details"] = params.Driver
+		dSel["arranged"] = true
+		dSel["status"] = "ARRANGED"
+		resSelections["driver"] = dSel
+
+		meta["vendor_driver_details"] = params.Driver
+		updatedLabels = append(updatedLabels, "driver")
+	}
+
+	// 3. Generic single resource detail
+	if params.ResourceKey != "" && params.ResourceDetails != nil && len(params.ResourceDetails) > 0 {
+		rKey := params.ResourceKey
+		vendorResDetails[rKey] = map[string]interface{}{
+			"resource_key": rKey,
+			"status":       "ARRANGED",
+			"details":      params.ResourceDetails,
+			"updated_at":   time.Now().UTC().Format(time.RFC3339),
+		}
+
+		rSel, _ := resSelections[rKey].(map[string]interface{})
+		if rSel == nil {
+			rSel = map[string]interface{}{
+				"resource_key": rKey,
+				"choice":       fmt.Sprintf("NEED_%s", strings.ToUpper(rKey)),
+			}
+		}
+		rSel["vendor_details"] = params.ResourceDetails
+		rSel["arranged"] = true
+		rSel["status"] = "ARRANGED"
+		resSelections[rKey] = rSel
+
+		meta["vendor_"+rKey+"_details"] = params.ResourceDetails
+		updatedLabels = append(updatedLabels, rKey)
+	}
+
+	// 4. Batch resources
+	if params.Resources != nil && len(params.Resources) > 0 {
+		for rKey, rawDet := range params.Resources {
+			if detMap, ok := rawDet.(map[string]interface{}); ok && len(detMap) > 0 {
+				vendorResDetails[rKey] = map[string]interface{}{
+					"resource_key": rKey,
+					"status":       "ARRANGED",
+					"details":      detMap,
+					"updated_at":   time.Now().UTC().Format(time.RFC3339),
+				}
+
+				rSel, _ := resSelections[rKey].(map[string]interface{})
+				if rSel == nil {
+					rSel = map[string]interface{}{
+						"resource_key": rKey,
+					}
+				}
+				rSel["vendor_details"] = detMap
+				rSel["arranged"] = true
+				rSel["status"] = "ARRANGED"
+				resSelections[rKey] = rSel
+
+				meta["vendor_"+rKey+"_details"] = detMap
+				updatedLabels = append(updatedLabels, rKey)
+			}
+		}
+	}
+
+	meta["vendor_resource_details"] = vendorResDetails
+	meta["resource_selections"] = resSelections
+
+	newMetaBytes, err := json.Marshal(meta)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode metadata: %w", err)
+	}
+
+	if err := s.oppRepo.UpdateMetadata(ctx, opp.ID, newMetaBytes); err != nil {
+		return nil, fmt.Errorf("failed to persist updated resource details: %w", err)
+	}
+	opp.Metadata = newMetaBytes
+
+	// Dispatch notification to customer
+	if len(updatedLabels) > 0 {
+		labelStr := strings.Join(updatedLabels, " & ")
+		notif := &domain.Notification{
+			UserID:   opp.UserID,
+			Title:    fmt.Sprintf("Resource Arranged (Order #%s)", opp.ID.String()[:8]),
+			Message:  fmt.Sprintf("Your provider has confirmed %s arrangement details for your order: %s", labelStr, opp.Title),
+			Type:     "ORDER_UPDATE",
+			Metadata: json.RawMessage(fmt.Sprintf(`{"opportunity_id":"%s"}`, opp.ID.String())),
+		}
+		_, _ = s.userRepo.CreateNotification(ctx, notif)
+	}
+
+	return opp, nil
 }

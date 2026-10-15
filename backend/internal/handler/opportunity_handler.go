@@ -124,12 +124,10 @@ func (h *OpportunityHandler) Create(w http.ResponseWriter, r *http.Request) {
 		PriceUnit:     p.PriceUnit,
 	}
 
-	if opp.OrderMode == "" {
-		if p.TargetVendorID != nil && *p.TargetVendorID != "" {
-			opp.OrderMode = domain.OrderModeCatalog
-		} else {
-			opp.OrderMode = domain.OrderModeGeneral
-		}
+	if p.OrderMode == "CATALOG" || p.OrderMode == "CATALOG_ORDER" || (p.TargetVendorID != nil && *p.TargetVendorID != "") {
+		opp.OrderMode = domain.OrderModeCatalog
+	} else {
+		opp.OrderMode = domain.OrderModeGeneral
 	}
 
 	if p.TargetVendorID != nil && *p.TargetVendorID != "" {
@@ -150,6 +148,33 @@ func (h *OpportunityHandler) Create(w http.ResponseWriter, r *http.Request) {
 		cid, err := uuid.Parse(*p.CategoryID)
 		if err == nil {
 			opp.CategoryID = &cid
+		} else {
+			cat, catErr := h.oppService.GetCategoryBySlugOrName(r.Context(), *p.CategoryID)
+			if catErr == nil && cat != nil {
+				opp.CategoryID = &cat.ID
+			}
+		}
+	}
+	if opp.CategoryID == nil && p.Metadata != nil {
+		if catSlug, ok := p.Metadata["category_slug"].(string); ok && catSlug != "" {
+			cat, catErr := h.oppService.GetCategoryBySlugOrName(r.Context(), catSlug)
+			if catErr == nil && cat != nil {
+				opp.CategoryID = &cat.ID
+			}
+		} else if catName, ok := p.Metadata["category_name"].(string); ok && catName != "" {
+			cat, catErr := h.oppService.GetCategoryBySlugOrName(r.Context(), catName)
+			if catErr == nil && cat != nil {
+				opp.CategoryID = &cat.ID
+			}
+		} else if catIDStr, ok := p.Metadata["category_id"].(string); ok && catIDStr != "" {
+			if cid, err := uuid.Parse(catIDStr); err == nil {
+				opp.CategoryID = &cid
+			} else {
+				cat, catErr := h.oppService.GetCategoryBySlugOrName(r.Context(), catIDStr)
+				if catErr == nil && cat != nil {
+					opp.CategoryID = &cat.ID
+				}
+			}
 		}
 	}
 
@@ -312,9 +337,24 @@ func (h *OpportunityHandler) UpdateStatus(w http.ResponseWriter, r *http.Request
 
 	var providerID uuid.UUID
 	if p.UserID != nil && *p.UserID != "" {
-		providerID, _ = uuid.Parse(*p.UserID)
-	} else if p.Phone != nil && *p.Phone != "" {
+		uid, err := uuid.Parse(*p.UserID)
+		if err == nil {
+			providerID = uid
+		} else {
+			u, _ := h.userRepo.GetByPhone(r.Context(), *p.UserID)
+			if u != nil {
+				providerID = u.ID
+			}
+		}
+	}
+	if providerID == uuid.Nil && p.Phone != nil && *p.Phone != "" {
 		u, _ := h.userRepo.GetByPhone(r.Context(), *p.Phone)
+		if u != nil {
+			providerID = u.ID
+		}
+	}
+	if providerID == uuid.Nil {
+		u := h.getUserFromRequest(r)
 		if u != nil {
 			providerID = u.ID
 		}
@@ -365,13 +405,47 @@ func (h *OpportunityHandler) GetStatusHistory(w http.ResponseWriter, r *http.Req
 }
 
 func (h *OpportunityHandler) getUserFromRequest(r *http.Request) *domain.User {
+	// 1. Direct Authorization Header inspection (even if route is not wrapped by auth middleware)
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.Split(authHeader, " ")
+		tokenStr := authHeader
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			tokenStr = parts[1]
+		}
+		if tokenStr != "" {
+			if uid, err := uuid.Parse(tokenStr); err == nil {
+				if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
+					return u
+				}
+			}
+			if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil {
+				return u
+			}
+			if u, _ := h.userRepo.GetByPhone(r.Context(), tokenStr); u != nil {
+				return u
+			}
+		}
+	}
+
+	// 2. JWT claims from context
 	claims, ok := middleware.GetUserClaims(r.Context())
 	if ok && claims.SupabaseUID != "" {
 		u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
 		if u != nil {
 			return u
 		}
+		if uid, err := uuid.Parse(claims.SupabaseUID); err == nil {
+			if uByID, _ := h.userRepo.GetByID(r.Context(), uid); uByID != nil {
+				return uByID
+			}
+		}
+		if uByPhone, _ := h.userRepo.GetByPhone(r.Context(), claims.SupabaseUID); uByPhone != nil {
+			return uByPhone
+		}
 	}
+
+	// 3. Query parameters (user_id or phone)
 	userParam := r.URL.Query().Get("user_id")
 	if userParam == "" {
 		userParam = r.URL.Query().Get("phone")
@@ -388,10 +462,6 @@ func (h *OpportunityHandler) getUserFromRequest(r *http.Request) *domain.User {
 		if u != nil {
 			return u
 		}
-	}
-	users, err := h.userRepo.ListUsers(r.Context())
-	if err == nil && len(users) > 0 {
-		return users[0]
 	}
 	return nil
 }
@@ -519,4 +589,56 @@ func (h *OpportunityHandler) GetUnreadNotificationCount(w http.ResponseWriter, r
 	response.JSON(w, http.StatusOK, "Unread notification count retrieved", map[string]interface{}{
 		"unread_count": count,
 	})
+}
+
+type ConfirmResourcesRequest struct {
+	ProviderID      string                 `json:"provider_id"`
+	Vehicle         map[string]interface{} `json:"vehicle"`
+	Driver          map[string]interface{} `json:"driver"`
+	ResourceKey     string                 `json:"resource_key"`
+	ResourceDetails map[string]interface{} `json:"resource_details"`
+	Resources       map[string]interface{} `json:"resources"`
+}
+
+func (h *OpportunityHandler) ConfirmResources(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	oppID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid opportunity ID", err.Error())
+		return
+	}
+
+	var req ConfirmResourcesRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil && r.ContentLength > 0 {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	callerIdent := req.ProviderID
+	if callerIdent == "" {
+		claims, ok := middleware.GetUserClaims(r.Context())
+		if ok {
+			callerIdent = claims.SupabaseUID
+		}
+	}
+
+	updated, err := h.oppService.ConfirmResources(r.Context(), service.ConfirmResourcesParams{
+		OpportunityID:   oppID,
+		CallerIdent:     callerIdent,
+		Vehicle:         req.Vehicle,
+		Driver:          req.Driver,
+		ResourceKey:     req.ResourceKey,
+		ResourceDetails: req.ResourceDetails,
+		Resources:       req.Resources,
+	})
+	if err != nil {
+		status := http.StatusBadRequest
+		if strings.Contains(err.Error(), "unauthorized") {
+			status = http.StatusForbidden
+		}
+		response.Error(w, status, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Resource details confirmed and customer notified successfully", updated)
 }

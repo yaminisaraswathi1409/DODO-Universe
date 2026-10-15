@@ -200,6 +200,11 @@ type VendorCatalogItem struct {
 	MinOrderQuantity int             `json:"min_order_quantity"`
 	Images           json.RawMessage `json:"images,omitempty"`
 	Attributes       json.RawMessage `json:"attributes,omitempty"`
+	Status           string          `json:"status,omitempty"`
+	RejectionReason  string          `json:"rejection_reason,omitempty"`
+	PickupLat        float64         `json:"pickup_lat,omitempty"`
+	PickupLng        float64         `json:"pickup_lng,omitempty"`
+	PickupAddress    string          `json:"pickup_address,omitempty"`
 	IsAvailable      bool            `json:"is_available"`
 	CreatedAt        time.Time       `json:"created_at"`
 	UpdatedAt        time.Time       `json:"updated_at"`

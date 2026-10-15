@@ -2,6 +2,7 @@
 
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useRouter, useSearchParams } from 'next/navigation';
 import {
   Opportunity,
   Category,
@@ -69,7 +70,12 @@ export default function OpportunitiesMarketplaceClient({
   initialCategory,
   initialType,
 }: MarketplaceClientProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { cartCount, isCartOpen, setIsCartOpen } = useCart();
+
+  const vendorParam = searchParams ? searchParams.get('vendor') : null;
+  const categoryParam = searchParams ? searchParams.get('category') : null;
 
   // TWO primary customer choices:
   // 1. 'SHOPS' = BROWSE SHOPS / BRANDS (Vendor-centric flow)
@@ -94,12 +100,33 @@ export default function OpportunitiesMarketplaceClient({
   const [modalOpen, setModalOpen] = useState(false);
   const [modalDefaultType, setModalDefaultType] = useState<'NEED' | 'OFFER'>('NEED');
   const [selectedModalCatId, setSelectedModalCatId] = useState<string | undefined>(undefined);
+  const [reqModalInitialQty, setReqModalInitialQty] = useState<number | undefined>(undefined);
+  const [reqModalInitialUnit, setReqModalInitialUnit] = useState<string | undefined>(undefined);
+  const [reqModalInitialValues, setReqModalInitialValues] = useState<Record<string, any> | undefined>(undefined);
   const [orderWizardOpen, setOrderWizardOpen] = useState(false);
+  const [checkoutOpenedFromCart, setCheckoutOpenedFromCart] = useState(false);
 
   // Vendor Storefront Modal State
   const [storefrontOpen, setStorefrontOpen] = useState(false);
   const [selectedVendorId, setSelectedVendorId] = useState<string | null>(null);
   const [selectedVendorUser, setSelectedVendorUser] = useState<UserProfile | null>(null);
+
+  // Sync vendor storefront modal open state with URL search params (enables Back & Forward)
+  useEffect(() => {
+    if (vendorParam) {
+      setSelectedVendorId(vendorParam);
+      setStorefrontOpen(true);
+    } else {
+      setStorefrontOpen(false);
+      setSelectedVendorId(null);
+    }
+  }, [vendorParam]);
+
+  useEffect(() => {
+    if (categoryParam !== null && categoryParam !== selectedCategorySlug) {
+      setSelectedCategorySlug(categoryParam);
+    }
+  }, [categoryParam]);
 
   // Order Wizard Pre-fill State for Direct Catalog/Service Order
   const [directOrderParams, setDirectOrderParams] = useState<{
@@ -119,51 +146,14 @@ export default function OpportunitiesMarketplaceClient({
   const fetchProviderOffersData = async (catSlug = selectedCategorySlug, query = searchQuery) => {
     setLoadingProviders(true);
     try {
-      let targetSlugs: string[] = [];
+      let offers: ProviderOffer[] = [];
       if (catSlug) {
-        targetSlugs = [catSlug];
-      } else if (query.trim()) {
-        const q = query.toLowerCase();
-        const matched = categories.filter((c) => c.name.toLowerCase().includes(q) || c.slug.toLowerCase().includes(q));
-        if (matched.length > 0) {
-          targetSlugs = matched.map((c) => c.slug);
-        } else {
-          targetSlugs = categories.map((c) => c.slug);
-        }
+        offers = await getProviderOffers(catSlug);
       } else {
-        targetSlugs = categories.map((c) => c.slug);
+        offers = await getProviderOffers('');
       }
 
-      if (targetSlugs.length === 0) {
-        targetSlugs = [
-          'bricks-building-materials',
-          'cement-construction',
-          'home-services',
-          'agriculture-farming',
-          'logistics-transport',
-          'equipment-machinery',
-          'vehicle-repair',
-          'medicine-healthcare',
-          'education-tutoring',
-        ];
-      }
-
-      const allOffers: ProviderOffer[] = [];
-      const seenOfferIds = new Set<string>();
-
-      await Promise.all(
-        targetSlugs.map(async (slug) => {
-          const offers = await getProviderOffers(slug);
-          offers.forEach((off: any) => {
-            if (!seenOfferIds.has(off.offer_id || off.id)) {
-              seenOfferIds.add(off.offer_id || off.id);
-              allOffers.push(off);
-            }
-          });
-        })
-      );
-
-      const filtered = allOffers.filter((off) => {
+      const filtered = offers.filter((off) => {
         if (!query.trim()) return true;
         const q = query.toLowerCase();
         return (
@@ -218,6 +208,15 @@ export default function OpportunitiesMarketplaceClient({
     fetchCatalogData(searchQuery, slug);
     fetchProviderOffersData(slug, searchQuery);
     fetchUpdatedOpportunities();
+
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    if (slug) {
+      params.set('category', slug);
+    } else {
+      params.delete('category');
+    }
+    const q = params.toString();
+    router.push(q ? `/opportunities?${q}` : '/opportunities');
   };
 
   const handleOpenRequestServiceForCategory = (category: Category) => {
@@ -235,6 +234,29 @@ export default function OpportunitiesMarketplaceClient({
     setSelectedVendorId(vendorUser.id);
     setSelectedVendorUser(vendorUser);
     setStorefrontOpen(true);
+
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    params.set('vendor', vendorUser.id);
+    params.delete('cat');
+    params.delete('opt');
+    router.push(`/opportunities?${params.toString()}`);
+  };
+
+  const handleCloseVendorStorefront = () => {
+    setStorefrontOpen(false);
+    setSelectedVendorId(null);
+    setSelectedVendorUser(null);
+
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    if (params.has('vendor')) {
+      router.back();
+    } else {
+      params.delete('vendor');
+      params.delete('cat');
+      params.delete('opt');
+      const q = params.toString();
+      router.push(q ? `/opportunities?${q}` : '/opportunities');
+    }
   };
 
   const handleSelectCatalogItemForOrder = (vendor: UserProfile, item: VendorCatalogItem, quantity: number) => {
@@ -411,27 +433,34 @@ export default function OpportunitiesMarketplaceClient({
   });
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 px-4 sm:px-6 py-8 sm:py-12 selection:bg-blue-500 selection:text-white">
+    <div className="min-h-screen bg-slate-50 text-slate-900 px-4 sm:px-6 py-8 sm:py-12 selection:bg-black selection:text-white">
       <div className="max-w-7xl mx-auto space-y-8">
         {/* Navigation & Cart Bar */}
         <div className="flex items-center justify-between">
-          <Link
-            href="/"
-            className="inline-flex items-center gap-2 text-sm font-medium text-slate-400 hover:text-white transition-colors"
+          <button
+            type="button"
+            onClick={() => {
+              if (typeof window !== 'undefined' && window.history.length > 1 && document.referrer && !document.referrer.endsWith('/opportunities') && !document.referrer.endsWith('/')) {
+                router.back();
+              } else {
+                router.push('/dashboard');
+              }
+            }}
+            className="inline-flex items-center gap-2 text-sm font-medium text-slate-600 hover:text-black transition-colors"
           >
             <ArrowLeft className="w-4 h-4" />
-            <span>Back to Home</span>
-          </Link>
+            <span>Back</span>
+          </button>
 
           <div className="flex items-center gap-3">
             <button
               onClick={() => setIsCartOpen(true)}
-              className="relative px-4 py-2 rounded-xl bg-slate-900 border border-slate-800 text-slate-200 hover:text-white text-xs font-bold flex items-center gap-2 transition-all shadow-md"
+              className="relative px-4 py-2 rounded-xl bg-white border border-slate-300 text-slate-800 hover:text-black hover:bg-slate-100 text-xs font-bold flex items-center gap-2 transition-all shadow-sm"
             >
-              <ShoppingBag className="w-4 h-4 text-emerald-400" />
+              <ShoppingBag className="w-4 h-4 text-black" />
               <span>Cart</span>
               {cartCount > 0 && (
-                <span className="px-2 py-0.5 rounded-full bg-emerald-500 text-white font-mono text-[10px] font-extrabold animate-pulse">
+                <span className="px-2 py-0.5 rounded-full bg-black text-white font-mono text-[10px] font-extrabold">
                   {cartCount}
                 </span>
               )}
@@ -442,27 +471,27 @@ export default function OpportunitiesMarketplaceClient({
                 setDirectOrderParams({});
                 setOrderWizardOpen(true);
               }}
-              className="inline-flex items-center gap-2 text-xs font-bold text-white bg-blue-600 hover:bg-blue-500 px-4 py-2 rounded-xl transition-all shadow-lg shadow-blue-600/30"
+              className="inline-flex items-center gap-2 text-xs font-bold text-white bg-black hover:bg-slate-800 px-4 py-2 rounded-xl transition-all shadow-md"
             >
-              <PlusCircle className="w-4 h-4" />
+              <PlusCircle className="w-4 h-4 text-white" />
               <span>New Order Wizard</span>
             </button>
           </div>
         </div>
 
         {/* Hero Header */}
-        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-slate-800">
+        <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6 pb-6 border-b border-slate-200">
           <div>
             <div className="flex items-center gap-2 mb-2">
-              <span className="px-3 py-1 rounded-full text-xs font-bold text-emerald-400 bg-emerald-500/10 border border-emerald-500/30 uppercase tracking-widest flex items-center gap-1.5">
-                <Sparkles className="w-3.5 h-3.5" />
+              <span className="px-3 py-1 rounded-full text-xs font-bold text-slate-900 bg-white border border-slate-300 uppercase tracking-widest flex items-center gap-1.5 shadow-sm">
+                <Sparkles className="w-3.5 h-3.5 text-slate-800" />
                 Universal Customer Platform
               </span>
             </div>
-            <h1 className="text-3xl sm:text-5xl font-extrabold text-white tracking-tight">
+            <h1 className="text-3xl sm:text-5xl font-extrabold text-slate-900 tracking-tight">
               Marketplace
             </h1>
-            <p className="text-slate-400 mt-2 text-sm sm:text-base max-w-2xl">
+            <p className="text-slate-600 mt-2 text-sm sm:text-base max-w-2xl">
               Request any service by defining your custom requirement & location, or browse verified vendor shops to book direct catalog items.
             </p>
           </div>
@@ -475,37 +504,37 @@ export default function OpportunitiesMarketplaceClient({
             onClick={() => setActiveTab('SHOPS')}
             className={`p-8 rounded-3xl border text-left transition-all relative overflow-hidden group flex flex-col justify-between space-y-6 ${
               activeTab === 'SHOPS'
-                ? 'bg-gradient-to-br from-emerald-950/90 via-slate-900 to-teal-950/40 border-emerald-500 text-white shadow-2xl shadow-emerald-500/15 ring-2 ring-emerald-500/50'
-                : 'bg-slate-900/50 border-slate-800/80 text-slate-400 hover:border-slate-700 hover:text-white'
+                ? 'bg-white border-black text-slate-900 shadow-md ring-2 ring-black'
+                : 'bg-white border-slate-200 text-slate-600 hover:border-slate-400 hover:text-slate-900'
             }`}
           >
             <div className="flex items-start justify-between gap-4">
-              <div className="p-4 rounded-2xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 shrink-0">
-                <Store className="w-8 h-8" />
+              <div className="p-4 rounded-2xl bg-black text-white shrink-0">
+                <Store className="w-8 h-8 text-white" />
               </div>
               {activeTab === 'SHOPS' && (
-                <span className="px-3 py-1 rounded-full bg-emerald-500/20 text-emerald-300 border border-emerald-500/40 text-xs font-bold flex items-center gap-1.5">
-                  <CheckCircle className="w-4 h-4 text-emerald-400" />
+                <span className="px-3 py-1 rounded-full bg-black text-white text-xs font-bold flex items-center gap-1.5">
+                  <CheckCircle className="w-4 h-4 text-white" />
                   Selected
                 </span>
               )}
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-2xl font-extrabold text-white group-hover:text-emerald-300 transition-colors">
+              <h2 className="text-2xl font-extrabold text-slate-900 group-hover:underline transition-colors">
                 BROWSE SHOPS / BRANDS
               </h2>
-              <p className="text-sm text-slate-300 leading-relaxed">
+              <p className="text-sm text-slate-600 leading-relaxed">
                 Choose a shop, brand, or vendor and book their available products and services directly.
               </p>
             </div>
 
-            <div className="pt-4 border-t border-slate-800/80 flex items-center justify-between">
-              <span className="px-5 py-2.5 rounded-xl bg-emerald-600 group-hover:bg-emerald-500 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-lg shadow-emerald-600/25 transition-all">
+            <div className="pt-4 border-t border-slate-200 flex items-center justify-between">
+              <span className="px-5 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-md transition-all">
                 <span>Browse Shops</span>
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="w-4 h-4 text-white" />
               </span>
-              <span className="text-xs text-slate-400 font-medium">Direct vendor catalog orders</span>
+              <span className="text-xs text-slate-500 font-medium">Direct vendor catalog orders</span>
             </div>
           </button>
 
@@ -514,37 +543,37 @@ export default function OpportunitiesMarketplaceClient({
             onClick={() => setActiveTab('REQUEST_WHAT_YOU_NEED')}
             className={`p-8 rounded-3xl border text-left transition-all relative overflow-hidden group flex flex-col justify-between space-y-6 ${
               activeTab === 'REQUEST_WHAT_YOU_NEED'
-                ? 'bg-gradient-to-br from-blue-950/90 via-slate-900 to-indigo-950/40 border-blue-500 text-white shadow-2xl shadow-blue-500/15 ring-2 ring-blue-500/50'
-                : 'bg-slate-900/50 border-slate-800/80 text-slate-400 hover:border-slate-700 hover:text-white'
+                ? 'bg-white border-black text-slate-900 shadow-md ring-2 ring-black'
+                : 'bg-white border-slate-200 text-slate-600 hover:border-slate-400 hover:text-slate-900'
             }`}
           >
             <div className="flex items-start justify-between gap-4">
-              <div className="p-4 rounded-2xl bg-blue-500/10 border border-blue-500/30 text-blue-400 shrink-0">
-                <Wrench className="w-8 h-8" />
+              <div className="p-4 rounded-2xl bg-black text-white shrink-0">
+                <Wrench className="w-8 h-8 text-white" />
               </div>
               {activeTab === 'REQUEST_WHAT_YOU_NEED' && (
-                <span className="px-3 py-1 rounded-full bg-blue-500/20 text-blue-300 border border-blue-500/40 text-xs font-bold flex items-center gap-1.5">
-                  <CheckCircle className="w-4 h-4 text-blue-400" />
+                <span className="px-3 py-1 rounded-full bg-black text-white text-xs font-bold flex items-center gap-1.5">
+                  <CheckCircle className="w-4 h-4 text-white" />
                   Selected
                 </span>
               )}
             </div>
 
             <div className="space-y-2">
-              <h2 className="text-2xl font-extrabold text-white group-hover:text-blue-300 transition-colors">
+              <h2 className="text-2xl font-extrabold text-slate-900 group-hover:underline transition-colors">
                 REQUEST WHAT YOU NEED
               </h2>
-              <p className="text-sm text-slate-300 leading-relaxed">
+              <p className="text-sm text-slate-600 leading-relaxed">
                 Tell us exactly what you need, including custom quantity and location. We&apos;ll find eligible providers.
               </p>
             </div>
 
-            <div className="pt-4 border-t border-slate-800/80 flex items-center justify-between">
-              <span className="px-5 py-2.5 rounded-xl bg-blue-600 group-hover:bg-blue-500 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-lg shadow-blue-600/25 transition-all">
+            <div className="pt-4 border-t border-slate-200 flex items-center justify-between">
+              <span className="px-5 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs inline-flex items-center gap-2 shadow-md transition-all">
                 <span>Make a Request</span>
-                <ChevronRight className="w-4 h-4" />
+                <ChevronRight className="w-4 h-4 text-white" />
               </span>
-              <span className="text-xs text-slate-400 font-medium">Match local providers</span>
+              <span className="text-xs text-slate-500 font-medium">Match local providers</span>
             </div>
           </button>
         </div>
@@ -554,12 +583,12 @@ export default function OpportunitiesMarketplaceClient({
         {/* ========================================================================= */}
         {activeTab === 'REQUEST_WHAT_YOU_NEED' && (
           <div className="space-y-6">
-            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-800 pb-4">
+            <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4 border-b border-slate-200 pb-4">
               <div>
-                <h2 className="text-xl sm:text-2xl font-extrabold text-white tracking-tight">
+                <h2 className="text-xl sm:text-2xl font-extrabold text-slate-900 tracking-tight">
                   REQUEST WHAT YOU NEED
                 </h2>
-                <p className="text-slate-400 text-xs sm:text-sm mt-1">
+                <p className="text-slate-600 text-xs sm:text-sm mt-1">
                   What do you need? Select a service category to specify your requirement details.
                 </p>
               </div>
@@ -567,16 +596,16 @@ export default function OpportunitiesMarketplaceClient({
 
             {/* Search and Category Filter */}
             <div className="space-y-4">
-              <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800">
+              <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
                 <div className="relative w-full">
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search for what you need... (e.g. Bricks, Driver, Cement, Plumbing)"
-                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500 font-sans"
+                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black font-sans"
                   />
-                  <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5" />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
                 </div>
               </div>
 
@@ -585,8 +614,8 @@ export default function OpportunitiesMarketplaceClient({
                   onClick={() => handleCategorySelect('')}
                   className={`px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all border ${
                     !selectedCategorySlug
-                      ? 'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-600/30'
-                      : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+                      ? 'bg-black border-black text-white shadow-md'
+                      : 'bg-white border-slate-300 text-slate-700 hover:text-black hover:bg-slate-50'
                   }`}
                 >
                   All
@@ -600,8 +629,8 @@ export default function OpportunitiesMarketplaceClient({
                       onClick={() => handleCategorySelect(cat.slug)}
                       className={`px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all border flex items-center gap-2 ${
                         isSelected
-                          ? 'bg-blue-600 border-blue-500 text-white shadow-md shadow-blue-600/30'
-                          : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+                          ? 'bg-black border-black text-white shadow-md'
+                          : 'bg-white border-slate-300 text-slate-700 hover:text-black hover:bg-slate-50'
                       }`}
                     >
                       <Tag className="w-3.5 h-3.5" />
@@ -614,15 +643,15 @@ export default function OpportunitiesMarketplaceClient({
 
             {/* Service Selection Cards Grid */}
             {uniqueServiceCategories.length === 0 ? (
-              <div className="text-center py-16 px-4 rounded-3xl bg-slate-900/40 border border-slate-800/80 space-y-4">
-                <Wrench className="w-12 h-12 text-slate-600 mx-auto" />
-                <h4 className="text-base font-bold text-slate-300">No Services Found</h4>
+              <div className="text-center py-16 px-4 rounded-3xl bg-white border border-slate-200 space-y-4 shadow-sm">
+                <Wrench className="w-12 h-12 text-slate-400 mx-auto" />
+                <h4 className="text-base font-bold text-slate-900">No Services Found</h4>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
                   No service categories match your search. Try clearing your search query or filters.
                 </p>
                 <button
                   onClick={() => handleCategorySelect('')}
-                  className="px-4 py-2 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-bold text-xs"
+                  className="px-4 py-2 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-xs"
                 >
                   Clear Filters
                 </button>
@@ -646,25 +675,25 @@ export default function OpportunitiesMarketplaceClient({
                   return (
                     <div
                       key={cat.id}
-                      className="p-6 rounded-3xl bg-slate-900/80 border border-slate-800 hover:border-blue-500/50 transition-all flex flex-col justify-between space-y-6 shadow-xl group"
+                      className="p-6 rounded-3xl bg-white border border-slate-200 hover:border-slate-400 transition-all flex flex-col justify-between space-y-6 shadow-sm group"
                     >
                       <div className="space-y-3">
                         <div className="text-4xl">{emoji}</div>
-                        <h3 className="text-xl font-extrabold text-white group-hover:text-blue-300 transition-colors">
+                        <h3 className="text-xl font-extrabold text-slate-900 group-hover:underline transition-colors">
                           {cat.name}
                         </h3>
-                        <p className="text-xs text-slate-400 leading-relaxed line-clamp-3">
-                          {cat.description || `Bricks, blocks, sand, gravel, and related ${cat.name.toLowerCase()} materials.`}
+                        <p className="text-xs text-slate-600 leading-relaxed line-clamp-3">
+                          {cat.description || `Verified ${cat.name} services, offerings, and custom requirements.`}
                         </p>
                       </div>
 
-                      <div className="pt-4 border-t border-slate-800/80 flex items-center justify-end">
+                      <div className="pt-4 border-t border-slate-200 flex items-center justify-end">
                         <button
                           onClick={() => handleOpenRequestServiceForCategory(cat)}
-                          className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs shadow-md shadow-blue-600/30 flex items-center justify-center gap-2 transition-all"
+                          className="w-full sm:w-auto px-6 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs shadow-md flex items-center justify-center gap-2 transition-all"
                         >
                           <span>SELECT</span>
-                          <ChevronRight className="w-4 h-4" />
+                          <ChevronRight className="w-4 h-4 text-white" />
                         </button>
                       </div>
                     </div>
@@ -683,29 +712,29 @@ export default function OpportunitiesMarketplaceClient({
           <div className="space-y-6">
             {/* Search and Category Filter for Shops Path */}
             <div className="space-y-4 pt-2">
-              <div className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800">
+              <div className="p-4 rounded-2xl bg-white border border-slate-200 shadow-sm">
                 <div className="relative w-full">
                   <input
                     type="text"
                     value={searchQuery}
                     onChange={(e) => setSearchQuery(e.target.value)}
                     placeholder="Search vendor shops or catalog products (e.g. XYZ Services, Bricks, Cement)..."
-                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-emerald-500 font-mono"
+                    className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black font-mono"
                   />
-                  <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-3.5" />
+                  <Search className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
                 </div>
               </div>
 
               <div className="space-y-2">
                 <div className="flex items-center justify-between">
-                  <span className="text-xs font-bold uppercase text-slate-400 tracking-wider flex items-center gap-1.5">
-                    <Filter className="w-3.5 h-3.5 text-emerald-400" />
+                  <span className="text-xs font-bold uppercase text-slate-500 tracking-wider flex items-center gap-1.5">
+                    <Filter className="w-3.5 h-3.5 text-slate-800" />
                     <span>Filter Shops by Category</span>
                   </span>
                   {selectedCategorySlug && (
                     <button
                       onClick={() => handleCategorySelect('')}
-                      className="text-xs text-emerald-400 hover:underline font-semibold"
+                      className="text-xs text-black hover:underline font-semibold"
                     >
                       Clear Category Filter
                     </button>
@@ -717,8 +746,8 @@ export default function OpportunitiesMarketplaceClient({
                     onClick={() => handleCategorySelect('')}
                     className={`px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all border ${
                       !selectedCategorySlug
-                        ? 'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-600/30'
-                        : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+                        ? 'bg-black border-black text-white shadow-md'
+                        : 'bg-white border-slate-300 text-slate-700 hover:text-black hover:bg-slate-50'
                     }`}
                   >
                     All Categories
@@ -732,8 +761,8 @@ export default function OpportunitiesMarketplaceClient({
                         onClick={() => handleCategorySelect(cat.slug)}
                         className={`px-4 py-2 rounded-xl text-xs font-bold shrink-0 transition-all border flex items-center gap-2 ${
                           isSelected
-                            ? 'bg-emerald-600 border-emerald-500 text-white shadow-md shadow-emerald-600/30'
-                            : 'bg-slate-900/80 border-slate-800 text-slate-400 hover:text-white hover:bg-slate-800'
+                            ? 'bg-black border-black text-white shadow-md'
+                            : 'bg-white border-slate-300 text-slate-700 hover:text-black hover:bg-slate-50'
                         }`}
                       >
                         <Tag className="w-3.5 h-3.5" />
@@ -745,29 +774,29 @@ export default function OpportunitiesMarketplaceClient({
               </div>
             </div>
 
-            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
-              <h3 className="text-sm font-extrabold uppercase text-slate-300 tracking-wider flex items-center gap-2">
-                <Store className="w-4 h-4 text-emerald-400" />
+            <div className="flex items-center justify-between border-b border-slate-200 pb-3">
+              <h3 className="text-sm font-extrabold uppercase text-slate-900 tracking-wider flex items-center gap-2">
+                <Store className="w-4 h-4 text-slate-800" />
                 <span>Verified Vendor Shops ({filteredUnifiedVendors.length} Vendors Found)</span>
               </h3>
               <span className="text-xs text-slate-500 font-mono">Each vendor appears EXACTLY ONCE</span>
             </div>
 
             {loadingCatalog || loadingProviders ? (
-              <div className="text-center py-16 px-4 rounded-3xl bg-slate-900/40 border border-slate-800 space-y-3">
-                <Clock className="w-8 h-8 text-emerald-400 animate-spin mx-auto" />
-                <p className="text-xs text-slate-400">Loading verified vendor storefronts...</p>
+              <div className="text-center py-16 px-4 rounded-3xl bg-white border border-slate-200 space-y-3 shadow-sm">
+                <Clock className="w-8 h-8 text-black animate-spin mx-auto" />
+                <p className="text-xs text-slate-500">Loading verified vendor storefronts...</p>
               </div>
             ) : filteredUnifiedVendors.length === 0 ? (
-              <div className="text-center py-16 px-4 rounded-3xl bg-slate-900/40 border border-slate-800/80 space-y-4">
-                <Store className="w-12 h-12 text-slate-600 mx-auto" />
-                <h4 className="text-base font-bold text-slate-300">No Vendor Shops Found</h4>
+              <div className="text-center py-16 px-4 rounded-3xl bg-white border border-slate-200 space-y-4 shadow-sm">
+                <Store className="w-12 h-12 text-slate-400 mx-auto" />
+                <h4 className="text-base font-bold text-slate-900">No Vendor Shops Found</h4>
                 <p className="text-xs text-slate-500 max-w-md mx-auto">
                   No verified vendor shops match your current search query or filter. Try clearing filters or switch to &quot;Request a Service&quot;.
                 </p>
                 <button
                   onClick={() => handleCategorySelect('')}
-                  className="px-4 py-2 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs"
+                  className="px-4 py-2 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-xs"
                 >
                   Clear Filters
                 </button>
@@ -801,40 +830,40 @@ export default function OpportunitiesMarketplaceClient({
                   return (
                     <div
                       key={v.vendorId}
-                      className="p-6 rounded-3xl bg-slate-900/80 border border-slate-800 hover:border-emerald-500/50 transition-all flex flex-col justify-between space-y-5 group shadow-xl"
+                      className="p-6 rounded-3xl bg-white border border-slate-200 hover:border-slate-400 transition-all flex flex-col justify-between space-y-5 group shadow-sm"
                     >
                       <div className="flex items-start justify-between gap-4">
                         <div className="flex items-center gap-3.5">
-                          <div className="w-14 h-14 rounded-2xl bg-slate-800 border border-slate-700 overflow-hidden flex items-center justify-center shrink-0">
+                          <div className="w-14 h-14 rounded-2xl bg-slate-100 border border-slate-200 overflow-hidden flex items-center justify-center shrink-0">
                             {v.vendorAvatar ? (
                               <img src={v.vendorAvatar} alt={v.vendorName} className="w-full h-full object-cover" />
                             ) : (
-                              <Store className="w-7 h-7 text-emerald-400" />
+                              <Store className="w-7 h-7 text-black" />
                             )}
                           </div>
                           <div>
                             <div className="flex items-center gap-2 flex-wrap">
-                              <h4 className="text-lg font-extrabold text-white group-hover:text-emerald-300 transition-colors">
+                              <h4 className="text-lg font-extrabold text-slate-900 group-hover:underline transition-colors">
                                 {v.vendorName}
                               </h4>
                               {v.isVerified && (
-                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[10px] font-extrabold">
-                                  <ShieldCheck className="w-3 h-3 text-emerald-400" />
+                                <span className="inline-flex items-center gap-1 px-2 py-0.5 rounded-full bg-black text-white text-[10px] font-extrabold">
+                                  <ShieldCheck className="w-3 h-3 text-white" />
                                   VERIFIED VENDOR
                                 </span>
                               )}
                             </div>
-                            <p className="text-xs text-slate-400 mt-1 flex items-center gap-2">
+                            <p className="text-xs text-slate-500 mt-1 flex items-center gap-2">
                               <span className="flex items-center gap-1">
-                                <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                                <MapPin className="w-3.5 h-3.5 text-slate-700 shrink-0" />
                                 <span>Coverage Area ({v.coverageRadiusKm}km radius)</span>
                               </span>
                             </p>
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-slate-950 border border-slate-800 text-amber-400 text-xs font-bold shrink-0">
-                          <Star className="w-3.5 h-3.5 fill-amber-400" />
+                        <div className="flex items-center gap-1 px-3 py-1.5 rounded-xl bg-amber-50 border border-amber-200 text-amber-900 text-xs font-bold shrink-0">
+                          <Star className="w-3.5 h-3.5 fill-amber-400 text-amber-500" />
                           <span>{v.trustScore ? v.trustScore.toFixed(1) : '5.0'}</span>
                         </div>
                       </div>
@@ -848,13 +877,13 @@ export default function OpportunitiesMarketplaceClient({
                             {displayedOfferings.map((name) => (
                               <span
                                 key={name}
-                                className="px-2.5 py-1 rounded-lg bg-emerald-500/10 border border-emerald-500/30 text-emerald-300 text-xs font-semibold"
+                                className="px-2.5 py-1 rounded-lg bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs font-semibold"
                               >
                                 {name}
                               </span>
                             ))}
                             {remainingCount > 0 && (
-                              <span className="px-2.5 py-1 rounded-lg bg-slate-800 border border-slate-700 text-slate-400 text-xs font-semibold">
+                              <span className="px-2.5 py-1 rounded-lg bg-slate-100 border border-slate-200 text-slate-700 text-xs font-semibold">
                                 +{remainingCount} more
                               </span>
                             )}
@@ -864,7 +893,7 @@ export default function OpportunitiesMarketplaceClient({
 
                       <button
                         onClick={() => handleOpenVendorStorefront(vendorUserObj)}
-                        className="w-full py-3.5 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-emerald-700 hover:from-emerald-500 hover:to-teal-500 text-white font-extrabold text-xs shadow-lg shadow-emerald-600/25 flex items-center justify-center gap-2 transition-all"
+                        className="w-full py-3.5 rounded-2xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs shadow-md flex items-center justify-center gap-2 transition-all"
                       >
                         <Store className="w-4 h-4 text-white" />
                         <span>View Shop & Storefront</span>
@@ -880,24 +909,24 @@ export default function OpportunitiesMarketplaceClient({
 
         {/* SECONDARY FOOTER SECTION: SUBMITTED REQUESTS & ORDER LOGS */}
         {/* Kept OUT of the top primary choice area */}
-        <div className="pt-8 border-t border-slate-800/80 space-y-4">
+        <div className="pt-8 border-t border-slate-200 space-y-4">
           <div className="flex items-center justify-between">
             <div className="flex items-center gap-2">
-              <Layers className="w-4 h-4 text-purple-400" />
-              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-400">
+              <Layers className="w-4 h-4 text-slate-700" />
+              <h3 className="text-xs font-bold uppercase tracking-wider text-slate-700">
                 Submitted Requests & Order History
               </h3>
             </div>
             <button
               onClick={() => setShowSubmittedRequests(!showSubmittedRequests)}
-              className="text-xs text-purple-400 hover:underline font-semibold flex items-center gap-1"
+              className="text-xs text-black hover:underline font-semibold flex items-center gap-1"
             >
               <span>{showSubmittedRequests ? 'Hide History Logs' : `Show History Logs (${opportunities.length})`}</span>
             </button>
           </div>
 
           {showSubmittedRequests && (
-            <div className="p-6 rounded-3xl bg-slate-950/60 border border-slate-800/80 space-y-4 animate-in fade-in">
+            <div className="p-6 rounded-3xl bg-slate-50 border border-slate-200 space-y-4 animate-in fade-in">
               {filteredSubmittedOpportunities.length === 0 ? (
                 <p className="text-xs text-slate-500 text-center py-4">No submitted requests found.</p>
               ) : (
@@ -910,24 +939,24 @@ export default function OpportunitiesMarketplaceClient({
                     return (
                       <div
                         key={opp.id}
-                        className="p-4 rounded-2xl bg-slate-900/80 border border-slate-800 flex flex-col justify-between space-y-3 text-xs"
+                        className="p-4 rounded-2xl bg-white border border-slate-200 flex flex-col justify-between space-y-3 text-xs shadow-sm"
                       >
                         <div className="space-y-2">
                           <div className="flex items-center justify-between">
-                            <span className="px-2 py-0.5 rounded bg-purple-500/10 text-purple-400 border border-purple-500/20 text-[10px] font-bold uppercase">
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-slate-800 border border-slate-200 text-[10px] font-bold uppercase">
                               {opp.type === 'NEED' ? 'REQUEST' : 'OFFER'}
                             </span>
-                            <span className="px-2 py-0.5 rounded bg-slate-950 text-[10px] text-slate-400 font-mono">
+                            <span className="px-2 py-0.5 rounded bg-slate-100 text-[10px] text-slate-700 font-mono">
                               {opp.status}
                             </span>
                           </div>
-                          <h5 className="font-bold text-white text-xs">{opp.title}</h5>
-                          <p className="text-[11px] text-slate-400 line-clamp-2">{opp.description}</p>
+                          <h5 className="font-bold text-slate-900 text-xs">{opp.title}</h5>
+                          <p className="text-[11px] text-slate-600 line-clamp-2">{opp.description}</p>
                         </div>
 
-                        <div className="pt-2 border-t border-slate-800/60 flex items-center justify-between text-[11px] text-slate-400">
+                        <div className="pt-2 border-t border-slate-100 flex items-center justify-between text-[11px] text-slate-600">
                           {qtyMeta ? <span>Qty: {qtyMeta} Units</span> : <span>Broadcast</span>}
-                          <span className="font-mono text-emerald-400 font-bold">
+                          <span className="font-mono text-emerald-700 font-bold">
                             {opp.budget_max ? `₹${opp.budget_max.toLocaleString()}` : 'Broadcast Match'}
                           </span>
                         </div>
@@ -943,28 +972,48 @@ export default function OpportunitiesMarketplaceClient({
         {/* Vendor Storefront Modal */}
         <VendorStorefrontModal
           isOpen={storefrontOpen}
-          onClose={() => setStorefrontOpen(false)}
+          onClose={handleCloseVendorStorefront}
           vendorId={selectedVendorId}
           initialVendorUser={selectedVendorUser}
           onSelectCatalogItemForOrder={handleSelectCatalogItemForOrder}
           onSelectServiceForOrder={handleSelectServiceForOrder}
+          onSwitchToRequestWhatYouNeed={(catSlug, initialQty, itemTitle) => {
+            const cat = categories.find((c) => c.slug === catSlug || c.id === catSlug);
+            setSelectedModalCatId(cat ? cat.id : catSlug);
+            setReqModalInitialQty(initialQty || 750);
+            setReqModalInitialUnit('Pieces');
+            if (itemTitle) {
+              setReqModalInitialValues({ offering_name: itemTitle });
+            }
+            setModalDefaultType('NEED');
+            setModalOpen(true);
+          }}
         />
 
         {/* Create Order Wizard Modal */}
         <CreateOrderWizardModal
           isOpen={orderWizardOpen}
-          onClose={() => setOrderWizardOpen(false)}
+          onClose={() => {
+            setOrderWizardOpen(false);
+            if (checkoutOpenedFromCart) {
+              setCheckoutOpenedFromCart(false);
+              setIsCartOpen(true);
+            }
+          }}
           initialCategorySlug={selectedCategorySlug}
           directOrderParams={directOrderParams}
           onCreated={handleOpportunityCreated}
         />
 
-        {/* Create Opportunity Modal for General Requests */}
+        {/* Create Opportunity Modal for Model 2: Request What You Need */}
         <CreateOpportunityModal
           isOpen={modalOpen}
           onClose={() => setModalOpen(false)}
           defaultType={modalDefaultType}
           initialCategoryId={selectedModalCatId}
+          initialQuantity={reqModalInitialQty}
+          initialUnit={reqModalInitialUnit}
+          initialCustomValues={reqModalInitialValues}
           onCreated={handleOpportunityCreated}
         />
 
@@ -975,6 +1024,7 @@ export default function OpportunitiesMarketplaceClient({
           onProceedToCheckout={() => {
             setIsCartOpen(false);
             setDirectOrderParams({});
+            setCheckoutOpenedFromCart(true);
             setOrderWizardOpen(true);
           }}
         />

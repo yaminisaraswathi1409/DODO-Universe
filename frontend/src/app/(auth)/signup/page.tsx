@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { signupUser, verifyOTP, UserProfile } from '@/lib/api';
 import { UserPlus, Smartphone, Mail, User, ArrowRight, ShieldCheck, RefreshCw, Zap } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 export default function UserSignupPage() {
   const router = useRouter();
@@ -47,8 +48,9 @@ export default function UserSignupPage() {
       setError('Please enter your full name');
       return;
     }
-    if (!phone || phone.length < 10) {
-      setError('Please enter a valid mobile phone number');
+    const phoneValidation = validatePhoneNumber(phone);
+    if (!phoneValidation.isValid) {
+      setError(phoneValidation.error || 'Please enter a valid mobile phone number');
       return;
     }
 
@@ -104,26 +106,26 @@ export default function UserSignupPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex items-center justify-center p-6 selection:bg-purple-500 selection:text-white">
-      <div className="glass-panel p-8 sm:p-10 rounded-3xl border border-slate-800 w-full max-w-md space-y-6 shadow-2xl">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6">
+      <div className="bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 w-full max-w-md space-y-6 shadow-xl">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-purple-600 via-indigo-500 to-blue-600 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-purple-500/30">
+          <div className="w-12 h-12 rounded-xl bg-black text-white flex items-center justify-center mx-auto mb-4 shadow-md">
             <UserPlus className="w-6 h-6 text-white" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white">Create DODO-Universe Account</h1>
-          <p className="text-slate-400 text-xs sm:text-sm mt-1.5">
+          <h1 className="text-2xl font-black text-slate-900">Create DODO-Universe Account</h1>
+          <p className="text-slate-600 text-xs sm:text-sm mt-1.5">
             Join the Universal Opportunity Platform. Enter your details to get started.
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs text-center font-medium">
+          <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs text-center font-medium">
             {error}
           </div>
         )}
 
         {demoOtp && step === 'OTP' && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs text-center font-mono">
+          <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-300 text-slate-800 text-xs text-center font-mono">
             Demo Signup OTP Code Dispatched: <strong className="text-sm underline">{demoOtp}</strong>
           </div>
         )}
@@ -131,53 +133,56 @@ export default function UserSignupPage() {
         {step === 'DETAILS' ? (
           <form onSubmit={handleSignupSubmit} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Full Name *</label>
+              <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Full Name *</label>
               <div className="relative">
                 <input
                   type="text"
                   value={fullName}
                   onChange={(e) => setFullName(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500"
+                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                   placeholder="e.g. Alice Smith"
                   required
                 />
-                <User className="w-4 h-4 text-purple-400 absolute left-3.5 top-3.5" />
+                <User className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Mobile Phone Number *</label>
+              <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Mobile Phone Number *</label>
               <div className="relative">
                 <input
-                  type="text"
+                  type="tel"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500"
+                  onChange={(e) => {
+                    setError('');
+                    setPhone(sanitizePhoneInput(e.target.value));
+                  }}
+                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                   placeholder="+919876543210"
                   required
                 />
-                <Smartphone className="w-4 h-4 text-purple-400 absolute left-3.5 top-3.5" />
+                <Smartphone className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
               </div>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Email Address (Optional)</label>
+              <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Email Address (Optional)</label>
               <div className="relative">
                 <input
                   type="email"
                   value={email}
                   onChange={(e) => setEmail(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500"
+                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                   placeholder="alice@example.com"
                 />
-                <Mail className="w-4 h-4 text-purple-400 absolute left-3.5 top-3.5" />
+                <Mail className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
               </div>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:opacity-95 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-md flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -192,10 +197,10 @@ export default function UserSignupPage() {
               )}
             </button>
 
-            <div className="pt-4 border-t border-slate-800 text-center space-y-2">
-              <p className="text-xs text-slate-400">
+            <div className="pt-4 border-t border-slate-200 text-center space-y-2">
+              <p className="text-xs text-slate-600">
                 Already have an account?{' '}
-                <Link href="/login" className="text-purple-400 font-semibold hover:underline">
+                <Link href="/login" className="text-black font-bold hover:underline">
                   Log in here →
                 </Link>
               </p>
@@ -203,18 +208,18 @@ export default function UserSignupPage() {
           </form>
         ) : (
           <form onSubmit={handleVerifyOTP} className="space-y-4">
-            <div className="p-3 rounded-xl bg-slate-900/60 border border-slate-800 text-xs text-slate-300 text-center">
-              Enter the 6-digit verification code sent to <strong className="text-purple-300">{phone}</strong>
+            <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 text-xs text-slate-700 text-center">
+              Enter the 6-digit verification code sent to <strong className="text-black">{phone}</strong>
             </div>
 
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
+              <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
               <input
                 type="text"
                 maxLength={6}
                 value={otp}
                 onChange={(e) => setOtp(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-center tracking-[0.5em] font-mono text-xl text-purple-400 focus:outline-none focus:border-purple-500"
+                className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-center tracking-[0.5em] font-mono text-xl text-black focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                 placeholder="123456"
                 required
               />
@@ -223,7 +228,7 @@ export default function UserSignupPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:opacity-95 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-md flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -241,7 +246,7 @@ export default function UserSignupPage() {
             <button
               type="button"
               onClick={() => setStep('DETAILS')}
-              className="w-full text-xs text-slate-400 hover:text-white font-medium py-1 text-center"
+              className="w-full text-xs text-slate-600 hover:text-black font-medium py-1 text-center"
             >
               ← Edit Signup Details
             </button>

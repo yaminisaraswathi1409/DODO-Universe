@@ -6,6 +6,9 @@ export interface CartItem {
   id: string;
   vendorId?: string;
   vendorName?: string;
+  vendorBrandName?: string;
+  vendorAvatar?: string;
+  vendorPhone?: string;
   catalogItemId?: string;
   vendorAssetId?: string;
   optionId?: string;
@@ -16,12 +19,15 @@ export interface CartItem {
   categoryName?: string;
   categorySlug?: string;
   icon?: string;
+  imageUrl?: string;
   title: string;
   description?: string;
   quantity: number;
   quantityUnit?: string;
   unitPrice: number;
   totalPrice: number;
+  selectedDate?: string;
+  selectedTime?: string;
   selectedVariant?: {
     id?: string;
     name?: string;

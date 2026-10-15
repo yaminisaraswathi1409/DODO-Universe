@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"crypto/rand"
+	"encoding/json"
 	"fmt"
 	"io"
 	"log"
@@ -50,9 +51,11 @@ func (s *UserService) InviteUser(ctx context.Context, adminUser *domain.User, fu
 		inviterID = adminUser.ID
 	}
 
-	if phone == "" {
-		return nil, fmt.Errorf("mobile number is required to invite a new user")
+	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
+	if err != nil {
+		return nil, err
 	}
+	phone = normPhone
 
 	otpCode := GenerateRandomOTP()
 	expiresAt := time.Now().Add(15 * time.Minute)
@@ -72,9 +75,11 @@ func (s *UserService) InviteUser(ctx context.Context, adminUser *domain.User, fu
 }
 
 func (s *UserService) SignupUser(ctx context.Context, fullName, phone, email string) (*domain.User, error) {
-	if phone == "" {
-		return nil, fmt.Errorf("phone number is required for signup")
+	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
+	if err != nil {
+		return nil, err
 	}
+	phone = normPhone
 
 	user, err := s.userRepo.SignupUser(ctx, fullName, phone, email)
 	if err != nil {
@@ -95,8 +100,14 @@ func (s *UserService) SignupUser(ctx context.Context, fullName, phone, email str
 }
 
 func (s *UserService) VerifyOTP(ctx context.Context, phone, otpCode string) (*domain.User, error) {
-	if phone == "" || otpCode == "" {
-		return nil, fmt.Errorf("phone number and OTP code are required")
+	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
+	if err != nil {
+		return nil, err
+	}
+	phone = normPhone
+
+	if otpCode == "" {
+		return nil, fmt.Errorf("OTP code is required")
 	}
 
 	user, err := s.userRepo.VerifyOTPRecord(ctx, phone, otpCode, true)
@@ -130,11 +141,48 @@ func (s *UserService) AddUserSkillAsset(ctx context.Context, userID uuid.UUID, c
 }
 
 func (s *UserService) AddUserSkillAssetWithAttributes(ctx context.Context, userID uuid.UUID, categoryID *uuid.UUID, assetType, title, description string, hourlyRate, dailyRate *float64, lat, lng float64, attributesJSON string, autoApprove bool) (*domain.UserSkillAsset, error) {
-	return s.userRepo.AddUserSkillAssetWithAttributes(ctx, userID, categoryID, assetType, title, description, hourlyRate, dailyRate, lat, lng, attributesJSON, autoApprove)
+	asset, err := s.userRepo.AddUserSkillAssetWithAttributes(ctx, userID, categoryID, assetType, title, description, hourlyRate, dailyRate, lat, lng, attributesJSON, autoApprove)
+	if err == nil && asset != nil {
+		notifTitle := "Service Submission Received"
+		notifMsg := fmt.Sprintf("Your service submission \"%s\" has been received and submitted for admin review.", title)
+		if autoApprove {
+			notifTitle = "Service Approved & Active!"
+			notifMsg = fmt.Sprintf("Your service submission \"%s\" has been auto-approved and is now ACTIVE!", title)
+		}
+		notifMeta, _ := json.Marshal(map[string]interface{}{
+			"asset_id": asset.ID,
+			"title":    asset.Title,
+			"status":   asset.Status,
+			"type":     "SERVICE_SUBMITTED",
+		})
+		_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+			UserID:   userID,
+			Title:    notifTitle,
+			Message:  notifMsg,
+			Type:     "SERVICE_SUBMITTED",
+			Metadata: notifMeta,
+		})
+	}
+	return asset, err
 }
 
 func (s *UserService) SubmitSkillAssetDocuments(ctx context.Context, assetID, userID uuid.UUID, documentsJSON string) (*domain.UserSkillAsset, error) {
-	return s.userRepo.SubmitSkillAssetDocuments(ctx, assetID, userID, documentsJSON)
+	asset, err := s.userRepo.SubmitSkillAssetDocuments(ctx, assetID, userID, documentsJSON)
+	if err == nil && asset != nil {
+		notifMeta, _ := json.Marshal(map[string]interface{}{
+			"asset_id": asset.ID,
+			"title":    asset.Title,
+			"type":     "DOCUMENTS_SUBMITTED",
+		})
+		_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+			UserID:   userID,
+			Title:    "Verification Documents Submitted",
+			Message:  fmt.Sprintf("Your verification documents for \"%s\" were uploaded successfully and are under admin review.", asset.Title),
+			Type:     "DOCUMENTS_SUBMITTED",
+			Metadata: notifMeta,
+		})
+	}
+	return asset, err
 }
 
 func (s *UserService) GetUserSkillsAssets(ctx context.Context, userID uuid.UUID) ([]*domain.UserSkillAsset, error) {
@@ -146,20 +194,76 @@ func (s *UserService) ListAllUserSkillAssetRequests(ctx context.Context, statusF
 }
 
 func (s *UserService) AdminApproveServiceRequest(ctx context.Context, assetID uuid.UUID) (*domain.UserSkillAsset, error) {
-	return s.userRepo.AdminApproveServiceRequest(ctx, assetID)
+	asset, err := s.userRepo.AdminApproveServiceRequest(ctx, assetID)
+	if err == nil && asset != nil {
+		notifMeta, _ := json.Marshal(map[string]interface{}{
+			"asset_id": asset.ID,
+			"title":    asset.Title,
+			"status":   asset.Status,
+			"type":     "SERVICE_PRE_APPROVED",
+		})
+		_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+			UserID:   asset.UserID,
+			Title:    "Service Request Pre-Approved!",
+			Message:  fmt.Sprintf("Your service request \"%s\" has been pre-approved by admin! Please upload verification documents to complete activation.", asset.Title),
+			Type:     "SERVICE_PRE_APPROVED",
+			Metadata: notifMeta,
+		})
+	}
+	return asset, err
 }
 
 func (s *UserService) AdminReviewDocuments(ctx context.Context, assetID uuid.UUID, approve bool, rejectionReason string) (*domain.UserSkillAsset, error) {
-	return s.userRepo.AdminReviewDocuments(ctx, assetID, approve, rejectionReason)
+	asset, err := s.userRepo.AdminReviewDocuments(ctx, assetID, approve, rejectionReason)
+	if err == nil && asset != nil {
+		var title, msg, nType string
+		if approve {
+			title = "Service Approved & Active!"
+			msg = fmt.Sprintf("Congratulations! Admin approved your verification documents for \"%s\". Your service is now ACTIVE!", asset.Title)
+			nType = "SERVICE_APPROVED"
+		} else {
+			title = "Service Application Update"
+			msg = fmt.Sprintf("Your service application for \"%s\" was rejected. Reason: %s", asset.Title, rejectionReason)
+			nType = "SERVICE_REJECTED"
+		}
+		notifMeta, _ := json.Marshal(map[string]interface{}{
+			"asset_id": asset.ID,
+			"title":    asset.Title,
+			"status":   asset.Status,
+			"type":     nType,
+		})
+		_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+			UserID:   asset.UserID,
+			Title:    title,
+			Message:  msg,
+			Type:     nType,
+			Metadata: notifMeta,
+		})
+	}
+	return asset, err
 }
 
 func (s *UserService) DeleteUserSkillAsset(ctx context.Context, assetID, userID uuid.UUID) error {
 	return s.userRepo.DeleteUserSkillAsset(ctx, assetID, userID)
 }
 
-
 func (s *UserService) UpdateUserStatus(ctx context.Context, userID uuid.UUID, status domain.UserStatus) (*domain.User, error) {
-	return s.userRepo.UpdateStatus(ctx, userID, status)
+	user, err := s.userRepo.UpdateStatus(ctx, userID, status)
+	if err == nil && user != nil {
+		notifMeta, _ := json.Marshal(map[string]interface{}{
+			"user_id": user.ID,
+			"status":  string(status),
+			"type":    "ACCOUNT_STATUS_UPDATED",
+		})
+		_, _ = s.userRepo.CreateNotification(ctx, &domain.Notification{
+			UserID:   user.ID,
+			Title:    "Account Status Update",
+			Message:  fmt.Sprintf("Your account status has been updated to %s.", string(status)),
+			Type:     "ACCOUNT_STATUS_UPDATED",
+			Metadata: notifMeta,
+		})
+	}
+	return user, err
 }
 
 func (s *UserService) VerifyFace(ctx context.Context, userID uuid.UUID, faceRef string) (*domain.User, error) {
@@ -197,9 +301,11 @@ func (s *UserService) ListUsers(ctx context.Context) ([]*domain.User, error) {
 }
 
 func (s *UserService) RequestOTP(ctx context.Context, phone string) (*domain.User, error) {
-	if phone == "" {
-		return nil, fmt.Errorf("mobile phone number is required")
+	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
+	if err != nil {
+		return nil, err
 	}
+	phone = normPhone
 
 	otpCode := GenerateRandomOTP()
 	expiresAt := time.Now().Add(15 * time.Minute)

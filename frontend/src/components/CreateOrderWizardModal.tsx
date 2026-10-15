@@ -6,6 +6,7 @@ import LocationSelectorModal, { LocationData } from './LocationSelectorModal';
 import SavedAddressesModal from './SavedAddressesModal';
 import { useCart } from '@/context/CartContext';
 import { X, MapPin, User, Users, Calendar, Clock, Tag, FileText, CheckCircle, RefreshCw, ChevronRight, Edit3, Send, AlertCircle, ArrowLeft, Package, DollarSign, Mail, Phone as PhoneIcon, Home, Briefcase, Building2, Star, ShoppingBag, Truck, UserCheck, ExternalLink, Sparkles, Info, Wrench, Store } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 
 interface CreateOrderWizardModalProps {
@@ -292,9 +293,17 @@ export default function CreateOrderWizardModal({
   useEffect(() => {
     if (!isOpen) return;
 
-    const handlePopState = () => {
-      if (step > 1) {
-        setStep((prev) => (prev - 1) as 1 | 2 | 3);
+    if (typeof window !== 'undefined') {
+      const currentState = window.history.state;
+      if (!currentState || currentState.modal !== 'order_wizard' || currentState.step !== step) {
+        window.history.pushState({ modal: 'order_wizard', step }, '', window.location.href);
+      }
+    }
+
+    const handlePopState = (e: PopStateEvent) => {
+      const state = e.state;
+      if (state && state.modal === 'order_wizard' && typeof state.step === 'number') {
+        setStep(state.step as 1 | 2 | 3);
       } else {
         onClose();
       }
@@ -535,6 +544,11 @@ export default function CreateOrderWizardModal({
         setError('Please enter recipient phone number');
         return false;
       }
+      const phoneValidation = validatePhoneNumber(recipient.recipientPhone.trim());
+      if (!phoneValidation.isValid) {
+        setError(phoneValidation.error || 'Please enter a valid 10-digit mobile number for recipient');
+        return false;
+      }
       if (!recipient.deliveryLocation.trim()) {
         setError('Please enter recipient delivery address');
         return false;
@@ -652,9 +666,16 @@ export default function CreateOrderWizardModal({
       const deliveryLat = targetType === 'SOMEONE_ELSE' ? location.lat : activeSavedAddress.lat || location.lat;
       const deliveryLng = targetType === 'SOMEONE_ELSE' ? location.lng : activeSavedAddress.lng || location.lng;
 
-      const quantityVal = cartItems.length > 0
-        ? cartItems[0].quantity
-        : (customValues['quantity'] || customValues['quantity_needed'] || customValues['quantity_bags'] || customValues['cargo_weight_tons'] || customValues['farm_area_acres'] || customValues['capacity'] || customValues['units'] || (selectedCategory?.slug?.includes('brick') ? 300 : undefined));
+      const quantityVal = directOrderParams?.quantity ||
+        (cartItems.length > 0 ? cartItems[0].quantity : undefined) ||
+        customValues['quantity'] ||
+        customValues['quantity_needed'] ||
+        customValues['quantity_bags'] ||
+        customValues['cargo_weight_tons'] ||
+        customValues['farm_area_acres'] ||
+        customValues['capacity'] ||
+        customValues['units'] ||
+        1;
       const pickupVal = customValues['pickup_location'] || customValues['source_location'] || (selectedCategory?.slug?.includes('brick') ? 'Choutuppal Brick Yard' : 'Source Location / Dispatch Yard');
       const hasTransportIncluded = cartItems.some(item => item.includedServices?.includes('TRANSPORT')) ||
         (deliveryCalcResult?.transport_charge === 0 && deliveryCalcResult?.item_title?.includes('Transport'));
@@ -704,11 +725,11 @@ export default function CreateOrderWizardModal({
         order_mode: (isDirectOrder || cartItems.length > 0) ? 'CATALOG_ORDER' : 'GENERAL_BROADCAST',
         target_vendor_id: directOrderParams?.vendorUser?.id || (cartItems.length > 0 ? cartItems[0].vendorId : undefined),
         catalog_item_id: directOrderParams?.catalogItem?.id || (cartItems.length > 0 ? cartItems[0].catalogItemId : undefined),
-        quantity: directOrderParams?.quantity || (typeof quantityVal === 'number' ? quantityVal : parseFloat(quantityVal || '1')),
-        unit_price: unitPriceVal,
+        quantity: directOrderParams?.quantity || (cartItems.length > 0 ? cartItems.reduce((sum, item) => sum + item.quantity, 0) : (typeof quantityVal === 'number' ? quantityVal : parseFloat(quantityVal || '1'))),
+        unit_price: directOrderParams?.catalogItem?.unit_price || (cartItems.length > 0 ? cartItems[0].unitPrice : unitPriceVal),
         total_price: directOrderParams?.catalogItem
           ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1)
-          : (unitPriceVal && directOrderParams?.quantity ? unitPriceVal * directOrderParams.quantity : undefined),
+          : (cartItems.length > 0 ? cartTotal : (unitPriceVal && directOrderParams?.quantity ? unitPriceVal * directOrderParams.quantity : undefined)),
         title: directOrderParams?.serviceAsset
           ? `Direct Service Order: ${directOrderParams.serviceAsset.title}`
           : (directOrderParams?.catalogItem
@@ -726,7 +747,7 @@ export default function CreateOrderWizardModal({
         radius_km: 25,
         budget_max: isDirectCatalogOrder && directOrderParams?.catalogItem
           ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1)
-          : (unitPriceVal ? unitPriceVal : (cartItems.length > 0 ? (cartTotal + transportCharge) : (budgetMax ? parseFloat(budgetMax) + transportCharge : calculatedDynamicBudget))),
+          : (cartItems.length > 0 ? (cartTotal + transportCharge) : (unitPriceVal ? unitPriceVal : (budgetMax ? parseFloat(budgetMax) + transportCharge : calculatedDynamicBudget))),
         price_unit: isDirectCatalogOrder ? directOrderParams?.catalogItem?.price_unit : priceUnit,
         scheduled_start: scheduledStart ? new Date(scheduledStart).toISOString() : undefined,
         user_id: currentUser?.id || undefined,
@@ -753,7 +774,22 @@ export default function CreateOrderWizardModal({
           },
           category_slug: selectedCategory?.slug,
           category_name: selectedCategory?.name,
-          quantity: quantityVal ? (isNaN(Number(quantityVal)) ? quantityVal : Number(quantityVal)) : (selectedCategory?.slug?.includes('brick') ? 300 : 1),
+          quantity: quantityVal ? (isNaN(Number(quantityVal)) ? quantityVal : Number(quantityVal)) : 1,
+          vendor_details: directOrderParams?.vendorUser ? {
+            id: directOrderParams.vendorUser.id,
+            name: directOrderParams.vendorUser.full_name,
+            brand_name: directOrderParams.vendorUser.full_name,
+            phone: directOrderParams.vendorUser.phone,
+            avatar_url: directOrderParams.vendorUser.avatar_url,
+          } : (cartItems.length > 0 ? {
+            id: cartItems[0].vendorId,
+            name: cartItems[0].vendorName,
+            brand_name: cartItems[0].vendorBrandName || cartItems[0].vendorName,
+            phone: cartItems[0].vendorPhone,
+            avatar_url: cartItems[0].vendorAvatar,
+          } : undefined),
+          booking_date: scheduledStart ? new Date(scheduledStart).toLocaleDateString() : undefined,
+          booking_time: scheduledStart ? new Date(scheduledStart).toLocaleTimeString() : undefined,
           // Store 100% Dynamic Resource Selections
           resource_selections: resourceSelectionsMap,
           // Legacy fields for backward compatibility ONLY if vehicle/driver resource is explicitly configured
@@ -823,44 +859,44 @@ export default function CreateOrderWizardModal({
 
   return (
     <>
-      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 backdrop-blur-md p-2 sm:p-4 overflow-hidden">
-        <div className="relative w-full max-w-2xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-[#0d1322] border border-slate-800 rounded-3xl shadow-2xl flex flex-col overflow-hidden">
+      <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-sm p-2 sm:p-4 overflow-hidden">
+        <div className="relative w-full max-w-2xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-white border border-slate-200 rounded-3xl shadow-2xl flex flex-col overflow-hidden text-slate-900">
 
           {/* Modal Fixed Header */}
-          <div className="p-5 sm:p-6 border-b border-slate-800/80 flex-none relative bg-[#0d1322]/95 backdrop-blur-sm">
+          <div className="p-5 sm:p-6 border-b border-slate-200 flex-none relative bg-white/95 backdrop-blur-sm">
             <button
               onClick={onClose}
-              className="absolute top-5 right-5 p-2 rounded-full text-slate-400 hover:text-white hover:bg-slate-800 transition-colors z-10"
+              className="absolute top-5 right-5 p-2 rounded-full text-slate-500 hover:text-black hover:bg-slate-100 transition-colors z-10"
               aria-label="Close wizard"
             >
               <X className="w-5 h-5" />
             </button>
 
-            {/* Food-Delivery Style Location Header Bar (Swiggy / Zomato Style) */}
-            <div className="mb-4 bg-gradient-to-r from-rose-950/40 via-slate-900 to-amber-950/40 border border-rose-500/30 p-3.5 sm:p-4 rounded-2xl flex items-center justify-between shadow-lg shadow-rose-500/5">
+            {/* Food-Delivery Style Location Header Bar */}
+            <div className="mb-4 bg-slate-100 border border-slate-300 p-3.5 sm:p-4 rounded-2xl flex items-center justify-between shadow-sm">
               <div className="flex items-start gap-3 overflow-hidden pr-2">
-                <div className="p-2 rounded-xl bg-rose-500/10 border border-rose-500/30 mt-0.5">
-                  <MapPin className="w-5 h-5 text-rose-400 shrink-0 animate-pulse" />
+                <div className="p-2 rounded-xl bg-white border border-slate-300 mt-0.5">
+                  <MapPin className="w-5 h-5 text-black shrink-0" />
                 </div>
                 <div className="overflow-hidden">
                   <div className="flex items-center gap-2">
-                    <span className="text-[10px] font-extrabold uppercase tracking-wider text-rose-400">DELIVER TO</span>
-                    <span className="px-2 py-0.5 rounded-full bg-slate-800 border border-slate-700 text-white font-bold text-[10px]">
+                    <span className="text-[10px] font-black uppercase tracking-wider text-slate-900">DELIVER TO</span>
+                    <span className="px-2 py-0.5 rounded-full bg-slate-200 text-slate-900 font-bold text-[10px]">
                       {activeSavedAddress.label || 'Home'}
                     </span>
                   </div>
-                  <div className="text-xs sm:text-sm font-bold text-white truncate mt-0.5">
+                  <div className="text-xs sm:text-sm font-bold text-slate-900 truncate mt-0.5">
                     {activeSavedAddress.addressText || location.addressText}
                   </div>
                   {activeSavedAddress.landmark && (
-                    <div className="text-[11px] text-slate-400 truncate">Landmark: {activeSavedAddress.landmark}</div>
+                    <div className="text-[11px] text-slate-600 truncate">Landmark: {activeSavedAddress.landmark}</div>
                   )}
                 </div>
               </div>
               <button
                 type="button"
                 onClick={() => setIsSavedAddressesModalOpen(true)}
-                className="px-3.5 py-2 rounded-xl bg-rose-600 hover:bg-rose-500 text-white font-bold text-xs shadow-md shadow-rose-600/20 transition-all shrink-0 ml-2"
+                className="px-3.5 py-2 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-xs shadow-sm transition-all shrink-0 ml-2"
               >
                 Change Address
               </button>
@@ -869,13 +905,13 @@ export default function CreateOrderWizardModal({
             {/* Fast 1-Screen Checkout Header Badge */}
             <div className="flex items-center justify-between">
               <div className="flex items-center gap-2">
-                <span className="px-2.5 py-1 rounded-full bg-emerald-500/15 border border-emerald-500/40 text-emerald-400 font-extrabold text-[11px] uppercase tracking-wider flex items-center gap-1.5">
-                  <Sparkles className="w-3.5 h-3.5 text-emerald-400" />
+                <span className="px-2.5 py-1 rounded-full bg-slate-100 border border-slate-300 text-slate-900 font-black text-[11px] uppercase tracking-wider flex items-center gap-1.5">
+                  <Sparkles className="w-3.5 h-3.5 text-black" />
                   <span>FAST 1-CLICK CHECKOUT</span>
                 </span>
-                <span className="text-slate-400 text-xs font-semibold">Pre-filled Customer & Address</span>
+                <span className="text-slate-600 text-xs font-semibold">Pre-filled Customer & Address</span>
               </div>
-              <span className="text-xs text-emerald-400 font-mono font-bold">Secure Instant Order</span>
+              <span className="text-xs text-black font-mono font-bold">Secure Instant Order</span>
             </div>
           </div>
 
@@ -883,7 +919,7 @@ export default function CreateOrderWizardModal({
           <div className="flex-1 min-h-0 overflow-y-auto overflow-x-hidden p-5 sm:p-6 space-y-6 touch-pan-y overscroll-contain">
 
             {error && (
-              <div className="mb-6 p-4 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs font-semibold flex items-center gap-2">
+              <div className="mb-6 p-4 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs font-semibold flex items-center gap-2">
                 <AlertCircle className="w-4 h-4 flex-shrink-0" />
                 <span>{error}</span>
               </div>
@@ -891,31 +927,31 @@ export default function CreateOrderWizardModal({
 
             {success ? (
               <div className="py-12 text-center space-y-4">
-                <CheckCircle className="w-16 h-16 text-emerald-400 mx-auto animate-bounce" />
-                <h3 className="text-2xl font-bold text-white">Order Placed Successfully!</h3>
-                <p className="text-slate-400 text-sm">Matching with nearby providers using PostGIS spatial engine...</p>
+                <CheckCircle className="w-16 h-16 text-black mx-auto animate-bounce" />
+                <h3 className="text-2xl font-black text-slate-900">Order Placed Successfully!</h3>
+                <p className="text-slate-600 text-sm">Matching with nearby providers using PostGIS spatial engine...</p>
               </div>
             ) : (
               <div className="space-y-6">
                 {/* CARD 1: Customer Contact & Delivery Details (Pre-filled & Editable) */}
-                <div className="p-4 sm:p-5 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900 to-blue-950/30 border border-slate-800 space-y-4 shadow-xl">
+                <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 space-y-4 shadow-sm">
                   <div className="flex items-center justify-between">
-                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-blue-400 flex items-center gap-1.5">
-                      <User className="w-4 h-4" />
+                    <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                      <User className="w-4 h-4 text-black" />
                       <span>Customer & Delivery Details</span>
                     </h4>
                     <div className="flex items-center gap-3">
                       <button
                         type="button"
                         onClick={() => setTargetType(targetType === 'MYSELF' ? 'SOMEONE_ELSE' : 'MYSELF')}
-                        className="text-[11px] font-semibold text-purple-400 hover:underline"
+                        className="text-[11px] font-bold text-black hover:underline"
                       >
                         {targetType === 'MYSELF' ? 'Deliver to someone else?' : 'Deliver to myself'}
                       </button>
                       <button
                         type="button"
                         onClick={() => setIsSavedAddressesModalOpen(true)}
-                        className="px-3 py-1 rounded-xl bg-slate-800 hover:bg-slate-700 text-rose-400 border border-rose-500/30 text-xs font-bold transition-all shrink-0"
+                        className="px-3 py-1 rounded-xl bg-slate-100 hover:bg-slate-200 text-black border border-slate-300 text-xs font-bold transition-all shrink-0"
                       >
                         Change Address
                       </button>
@@ -924,25 +960,28 @@ export default function CreateOrderWizardModal({
 
                   <div className="grid sm:grid-cols-2 gap-3 text-xs">
                     <div>
-                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">Customer / Receiver Name *</label>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Customer / Receiver Name *</label>
                       <input
                         type="text"
                         value={recipient.recipientName || (targetType === 'MYSELF' ? (currentUser?.full_name || '') : '')}
                         onChange={(e) => setRecipient({ ...recipient, recipientName: e.target.value })}
                         placeholder="Enter full name"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-semibold focus:outline-none focus:border-blue-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs font-semibold focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                         required
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">Mobile Number *</label>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Mobile Number *</label>
                       <input
-                        type="text"
+                        type="tel"
                         value={recipient.recipientPhone || (targetType === 'MYSELF' ? (currentUser?.phone || '') : '')}
-                        onChange={(e) => setRecipient({ ...recipient, recipientPhone: e.target.value })}
+                        onChange={(e) => {
+                          setError('');
+                          setRecipient({ ...recipient, recipientPhone: sanitizePhoneInput(e.target.value) });
+                        }}
                         placeholder="+91 Mobile number"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-mono font-semibold focus:outline-none focus:border-blue-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs font-mono font-semibold focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                         required
                       />
                     </div>
@@ -950,25 +989,25 @@ export default function CreateOrderWizardModal({
 
                   <div className="grid sm:grid-cols-3 gap-3 text-xs">
                     <div className="sm:col-span-2">
-                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">Delivery Address *</label>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Delivery Address *</label>
                       <input
                         type="text"
                         value={recipient.deliveryLocation || activeSavedAddress.addressText || location.addressText}
                         onChange={(e) => setRecipient({ ...recipient, deliveryLocation: e.target.value })}
                         placeholder="Street address, house number, area..."
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs focus:outline-none focus:border-blue-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                         required
                       />
                     </div>
 
                     <div>
-                      <label className="block text-[11px] font-semibold text-slate-300 mb-1">Pincode</label>
+                      <label className="block text-[11px] font-semibold text-slate-700 mb-1">Pincode</label>
                       <input
                         type="text"
                         value={recipient.pincode || ''}
                         onChange={(e) => setRecipient({ ...recipient, pincode: e.target.value })}
                         placeholder="e.g. 508252"
-                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-mono focus:outline-none focus:border-blue-500"
+                        className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs font-mono focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                       />
                     </div>
                   </div>
@@ -976,24 +1015,24 @@ export default function CreateOrderWizardModal({
 
                 {/* CARD: Scheduled Booking Date & Time Slot (Only for SCHEDULED categories) */}
                 {selectedCategory?.default_workflow === 'SCHEDULED' && (
-                  <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/90 border border-amber-500/40 space-y-3 shadow-xl">
-                    <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                      <h4 className="text-xs font-extrabold uppercase tracking-wider text-amber-400 flex items-center gap-1.5">
-                        <Calendar className="w-4 h-4 text-amber-400" />
+                  <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-300 space-y-3 shadow-sm">
+                    <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                      <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                        <Calendar className="w-4 h-4 text-black" />
                         <span>Scheduled Booking Date & Time Slot *</span>
                       </h4>
                     </div>
-                    <p className="text-[11px] text-slate-400">
+                    <p className="text-[11px] text-slate-600">
                       This service requires a scheduled booking time slot. Please select your preferred date and time.
                     </p>
                     <div className="grid sm:grid-cols-2 gap-3">
                       <div>
-                        <label className="block text-[11px] font-semibold text-slate-300 mb-1">Select Date & Start Time *</label>
+                        <label className="block text-[11px] font-semibold text-slate-700 mb-1">Select Date & Start Time *</label>
                         <input
                           type="datetime-local"
                           value={scheduledStart ? scheduledStart.substring(0, 16) : ''}
                           onChange={(e) => setScheduledStart(e.target.value)}
-                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-950 border border-slate-800 text-white text-xs font-mono focus:outline-none focus:border-amber-500"
+                          className="w-full px-3.5 py-2.5 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-xs font-mono focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                           required
                         />
                       </div>
@@ -1002,44 +1041,44 @@ export default function CreateOrderWizardModal({
                 )}
 
                 {/* CARD 2: Order Summary & Pricing Breakdown */}
-                <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-4 shadow-xl">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-2">
-                    <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                      <ShoppingBag className="w-4 h-4 text-emerald-400" />
+                <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 space-y-4 shadow-sm">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-2">
+                    <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                      <ShoppingBag className="w-4 h-4 text-black" />
                       <span>Order Summary ({cartItems.length > 0 ? `${cartItems.length} items` : '1 item'})</span>
                     </h4>
                   </div>
 
                   {Object.keys(ineligibleCartItems).length > 0 && (
-                    <div className="p-4 rounded-2xl bg-rose-950/40 border border-rose-500/40 space-y-3">
-                      <div className="flex items-center gap-2 text-rose-400 font-extrabold text-xs uppercase tracking-wider">
+                    <div className="p-4 rounded-2xl bg-rose-50 border border-rose-200 space-y-3">
+                      <div className="flex items-center gap-2 text-rose-700 font-extrabold text-xs uppercase tracking-wider">
                         <AlertCircle className="w-4 h-4 shrink-0 animate-bounce" />
                         <span>Service Unavailable at Selected Location</span>
                       </div>
                       <div className="space-y-2">
                         {Object.entries(ineligibleCartItems).map(([itemId, info]) => (
-                          <div key={itemId} className="p-3 rounded-xl bg-slate-950/90 border border-rose-500/30 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
+                          <div key={itemId} className="p-3 rounded-xl bg-white border border-rose-200 flex flex-col sm:flex-row sm:items-center justify-between gap-2 text-xs">
                             <div>
                               <div className="flex items-center gap-2">
-                                <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-300 text-[10px] font-bold">
+                                <span className="px-2 py-0.5 rounded bg-rose-100 text-rose-800 text-[10px] font-bold">
                                   {info.vendorName}
                                 </span>
-                                <span className="font-bold text-white">{info.title}</span>
+                                <span className="font-bold text-slate-900">{info.title}</span>
                               </div>
-                              <p className="text-[11px] text-rose-300/90 mt-1">{info.reason}</p>
+                              <p className="text-[11px] text-rose-700 mt-1">{info.reason}</p>
                             </div>
                             <div className="flex items-center gap-2 shrink-0 self-end sm:self-center">
                               <button
                                 type="button"
                                 onClick={() => removeFromCart(itemId)}
-                                className="px-3 py-1.5 rounded-lg bg-rose-600 hover:bg-rose-500 text-white text-[11px] font-bold transition-all shadow-md"
+                                className="px-3 py-1.5 rounded-lg bg-black hover:bg-slate-800 text-white text-[11px] font-bold transition-all shadow-sm"
                               >
                                 Remove Item
                               </button>
                               <button
                                 type="button"
                                 onClick={() => setIsSavedAddressesModalOpen(true)}
-                                className="px-3 py-1.5 rounded-lg bg-slate-800 hover:bg-slate-700 text-slate-200 text-[11px] font-bold transition-all"
+                                className="px-3 py-1.5 rounded-lg bg-slate-100 hover:bg-slate-200 text-slate-900 text-[11px] font-bold transition-all border border-slate-300"
                               >
                                 Change Location
                               </button>
@@ -1058,52 +1097,52 @@ export default function CreateOrderWizardModal({
                         const addonsList = item.selectedAddons || [];
 
                         return (
-                          <div key={item.id} className={`p-3 rounded-xl bg-slate-950/80 border flex items-center justify-between gap-3 text-xs ${isIneligible ? 'border-rose-500/50 bg-rose-950/20' : 'border-slate-800'}`}>
+                          <div key={item.id} className={`p-3 rounded-xl bg-slate-50 border flex items-center justify-between gap-3 text-xs ${isIneligible ? 'border-rose-300 bg-rose-50' : 'border-slate-200'}`}>
                             <div className="space-y-1">
                               <div className="flex items-center gap-1.5 flex-wrap">
                                 {item.vendorName && (
-                                  <span className="px-2 py-0.5 rounded bg-emerald-500/10 text-emerald-400 border border-emerald-500/20 text-[9px] font-bold uppercase">
+                                  <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-900 text-[9px] font-bold uppercase">
                                     {item.vendorName}
                                   </span>
                                 )}
-                                <span className="px-2 py-0.5 rounded bg-blue-500/10 text-blue-400 text-[9px] font-bold uppercase">
+                                <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-900 text-[9px] font-bold uppercase">
                                   {item.categoryName || 'Service'}
                                 </span>
                                 {isIneligible && (
-                                  <span className="px-2 py-0.5 rounded bg-rose-500/20 text-rose-400 text-[9px] font-bold uppercase">
+                                  <span className="px-2 py-0.5 rounded bg-rose-200 text-rose-800 text-[9px] font-bold uppercase">
                                     Unavailable at location
                                   </span>
                                 )}
                               </div>
 
-                              <h5 className="font-bold text-white text-xs mt-0.5">{item.title}</h5>
+                              <h5 className="font-bold text-slate-900 text-xs mt-0.5">{item.title}</h5>
 
                               {optionTitle && (
-                                <p className="text-[11px] text-emerald-300 font-semibold">
+                                <p className="text-[11px] text-slate-700 font-semibold">
                                   Package: {optionTitle}
                                 </p>
                               )}
 
                               {addonsList.length > 0 && (
-                                <p className="text-[10px] text-purple-300 font-mono">
+                                <p className="text-[10px] text-slate-600 font-mono">
                                   Add-ons: {addonsList.map((a) => `${a.title} (+₹${a.price})`).join(', ')}
                                 </p>
                               )}
 
-                              <span className="text-[11px] text-slate-400 font-mono block">
+                              <span className="text-[11px] text-slate-500 font-mono block">
                                 ₹{item.unitPrice.toLocaleString()} × {item.quantity} units
                               </span>
                             </div>
 
                             <div className="text-right shrink-0 flex items-center gap-3">
-                              <span className="text-emerald-400 font-extrabold text-sm font-mono block">
+                              <span className="text-slate-900 font-black text-sm font-mono block">
                                 ₹{(item.totalPrice || item.unitPrice * item.quantity).toLocaleString()}
                               </span>
                               {isIneligible && (
                                 <button
                                   type="button"
                                   onClick={() => removeFromCart(item.id)}
-                                  className="text-rose-400 hover:text-rose-300 p-1 hover:bg-rose-500/10 rounded transition-all"
+                                  className="text-rose-600 hover:text-rose-800 p-1 hover:bg-rose-100 rounded transition-all"
                                   title="Remove item"
                                 >
                                   <X className="w-4 h-4" />
@@ -1115,97 +1154,97 @@ export default function CreateOrderWizardModal({
                       })}
                     </div>
                   ) : isDirectCatalogOrder ? (
-                    <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-3 text-xs">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3 text-xs">
                       <div className="space-y-1">
-                        <span className="px-2 py-0.5 rounded bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-[9px] font-bold uppercase">
+                        <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-900 text-[9px] font-bold uppercase">
                           {directOrderParams?.vendorUser?.full_name || 'Vendor Product'}
                         </span>
-                        <h5 className="font-bold text-white text-sm">{directOrderParams?.catalogItem?.title}</h5>
-                        <p className="text-slate-400 text-[11px] line-clamp-1">{directOrderParams?.catalogItem?.description}</p>
+                        <h5 className="font-bold text-slate-900 text-sm">{directOrderParams?.catalogItem?.title}</h5>
+                        <p className="text-slate-600 text-[11px] line-clamp-1">{directOrderParams?.catalogItem?.description}</p>
                       </div>
                       <div className="text-right shrink-0">
-                        <span className="text-xs text-slate-400 font-mono block">Qty: {customValues['quantity'] || directOrderParams?.quantity || 1}</span>
-                        <span className="text-emerald-400 font-extrabold text-base font-mono block">
+                        <span className="text-xs text-slate-500 font-mono block">Qty: {customValues['quantity'] || directOrderParams?.quantity || 1}</span>
+                        <span className="text-slate-900 font-black text-base font-mono block">
                           ₹{((directOrderParams?.catalogItem?.unit_price || 0) * (parseFloat(customValues['quantity']) || directOrderParams?.quantity || 1)).toLocaleString()}
                         </span>
                       </div>
                     </div>
                   ) : isDirectServiceOrder ? (
-                    <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-3 text-xs">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3 text-xs">
                       <div className="space-y-1">
-                        <span className="px-2 py-0.5 rounded bg-blue-500/10 border border-blue-500/30 text-blue-400 text-[9px] font-bold uppercase">
+                        <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-900 text-[9px] font-bold uppercase">
                           {directOrderParams?.vendorUser?.full_name || 'Service Provider'}
                         </span>
-                        <h5 className="font-bold text-white text-sm">{directOrderParams?.serviceAsset?.title}</h5>
-                        <p className="text-slate-400 text-[11px] line-clamp-1">{directOrderParams?.serviceAsset?.description}</p>
+                        <h5 className="font-bold text-slate-900 text-sm">{directOrderParams?.serviceAsset?.title}</h5>
+                        <p className="text-slate-600 text-[11px] line-clamp-1">{directOrderParams?.serviceAsset?.description}</p>
                       </div>
                       <div className="text-right shrink-0">
-                        <span className="text-emerald-400 font-extrabold text-base font-mono block">
+                        <span className="text-slate-900 font-black text-base font-mono block">
                           ₹{(directOrderParams?.serviceAsset?.hourly_rate || directOrderParams?.serviceAsset?.daily_rate || 500).toLocaleString()}
                         </span>
                       </div>
                     </div>
                   ) : (
-                    <div className="p-3.5 rounded-xl bg-slate-950/80 border border-slate-800 flex items-center justify-between gap-3 text-xs">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-3 text-xs">
                       <div>
-                        <span className="px-2 py-0.5 rounded bg-amber-500/10 text-amber-400 text-[9px] font-bold uppercase">
+                        <span className="px-2 py-0.5 rounded bg-slate-200 text-slate-900 text-[9px] font-bold uppercase">
                           {selectedCategory?.name || 'General Service'}
                         </span>
-                        <h5 className="font-bold text-white text-sm mt-1">{title || (selectedCategory ? `${selectedCategory.name} Order` : 'Service Request')}</h5>
+                        <h5 className="font-bold text-slate-900 text-sm mt-1">{title || (selectedCategory ? `${selectedCategory.name} Order` : 'Service Request')}</h5>
                       </div>
                       <div className="text-right shrink-0">
-                        <span className="text-xs text-slate-400 font-mono block">Qty: {customValues['quantity'] || 1}</span>
+                        <span className="text-xs text-slate-500 font-mono block">Qty: {customValues['quantity'] || 1}</span>
                       </div>
                     </div>
                   )}
 
                   {/* Financial Breakdown Table */}
                   {calculatingDelivery ? (
-                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 flex items-center justify-center gap-2 text-xs text-slate-400">
-                      <RefreshCw className="w-4 h-4 animate-spin text-emerald-400" />
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 flex items-center justify-center gap-2 text-xs text-slate-600">
+                      <RefreshCw className="w-4 h-4 animate-spin text-black" />
                       <span>Calculating delivery distance & charges...</span>
                     </div>
                   ) : deliveryCalcResult ? (
-                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs font-mono">
-                      <div className="flex items-center justify-between text-slate-400">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs font-mono">
+                      <div className="flex items-center justify-between text-slate-600">
                         <span>Items Subtotal</span>
-                        <span className="text-slate-200 font-semibold">₹{deliveryCalcResult.subtotal.toLocaleString()}</span>
+                        <span className="text-slate-900 font-semibold">₹{deliveryCalcResult.subtotal.toLocaleString()}</span>
                       </div>
-                      <div className="flex items-center justify-between text-emerald-400 font-semibold">
+                      <div className="flex items-center justify-between text-slate-900 font-bold">
                         <span>Delivery Fee ({deliveryCalcResult.distance_km.toFixed(1)} km)</span>
                         <span>{deliveryCalcResult.delivery_charge > 0 ? `₹${deliveryCalcResult.delivery_charge.toLocaleString()}` : 'FREE'}</span>
                       </div>
-                      <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-sm font-extrabold text-white">
+                      <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-sm font-black text-slate-900">
                         <span>Total Payable</span>
-                        <span className="text-emerald-400 font-bold text-base">₹{deliveryCalcResult.final_payable.toLocaleString()}</span>
+                        <span className="text-slate-900 font-black text-base">₹{deliveryCalcResult.final_payable.toLocaleString()}</span>
                       </div>
                     </div>
                   ) : (
-                    <div className="p-3.5 rounded-xl bg-slate-950 border border-slate-800 space-y-2 text-xs font-mono">
-                      <div className="flex items-center justify-between text-slate-400">
+                    <div className="p-3.5 rounded-xl bg-slate-50 border border-slate-200 space-y-2 text-xs font-mono">
+                      <div className="flex items-center justify-between text-slate-600">
                         <span>Items Subtotal</span>
-                        <span className="text-slate-200 font-semibold">₹{(cartItems.length > 0 ? cartSubtotal : (directOrderParams?.catalogItem ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1) : 500)).toLocaleString()}</span>
+                        <span className="text-slate-900 font-semibold">₹{(cartItems.length > 0 ? cartSubtotal : (directOrderParams?.catalogItem ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1) : 500)).toLocaleString()}</span>
                       </div>
-                      <div className="flex items-center justify-between text-slate-400">
+                      <div className="flex items-center justify-between text-slate-600">
                         <span>Platform & Spatial Fee</span>
-                        <span className="text-slate-200 font-semibold">₹{platformFee}</span>
+                        <span className="text-slate-900 font-semibold">₹{platformFee}</span>
                       </div>
-                      <div className="flex items-center justify-between text-slate-400">
+                      <div className="flex items-center justify-between text-slate-600">
                         <span>Taxes & GST (18%)</span>
-                        <span className="text-slate-200 font-semibold">₹{taxAmount.toLocaleString()}</span>
+                        <span className="text-slate-900 font-semibold">₹{taxAmount.toLocaleString()}</span>
                       </div>
-                      <div className="pt-2 border-t border-slate-800 flex items-center justify-between text-sm font-extrabold text-white">
+                      <div className="pt-2 border-t border-slate-200 flex items-center justify-between text-sm font-black text-slate-900">
                         <span>Total Payable</span>
-                        <span className="text-emerald-400 font-bold text-base">₹{(cartItems.length > 0 ? cartTotal : (directOrderParams?.catalogItem ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1) : 500)).toLocaleString()}</span>
+                        <span className="text-slate-900 font-black text-base">₹{(cartItems.length > 0 ? cartTotal : (directOrderParams?.catalogItem ? directOrderParams.catalogItem.unit_price * (directOrderParams.quantity || 1) : 500)).toLocaleString()}</span>
                       </div>
                     </div>
                   )}
                 </div>
 
                 {/* CARD 3: Payment Method Selector */}
-                <div className="p-4 sm:p-5 rounded-2xl bg-slate-900/90 border border-slate-800 space-y-3 shadow-xl">
-                  <h4 className="text-xs font-extrabold uppercase tracking-wider text-slate-300 flex items-center gap-1.5">
-                    <DollarSign className="w-4 h-4 text-emerald-400" />
+                <div className="p-4 sm:p-5 rounded-2xl bg-white border border-slate-200 space-y-3 shadow-sm">
+                  <h4 className="text-xs font-black uppercase tracking-wider text-slate-900 flex items-center gap-1.5">
+                    <DollarSign className="w-4 h-4 text-black" />
                     <span>Payment Method</span>
                   </h4>
                   <div className="grid grid-cols-3 gap-2.5 text-xs font-bold">
@@ -1214,12 +1253,12 @@ export default function CreateOrderWizardModal({
                       onClick={() => setPaymentMethod('COD')}
                       className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center transition-all ${
                         paymentMethod === 'COD'
-                          ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 shadow-md ring-1 ring-emerald-500/30'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                          ? 'bg-black text-white border-black shadow-md'
+                          : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                       }`}
                     >
-                      <span className="text-xs font-extrabold">Pay on Delivery</span>
-                      <span className="text-[9px] font-normal text-slate-400 mt-0.5">Cash / UPI at doorstep</span>
+                      <span className="text-xs font-black">Pay on Delivery</span>
+                      <span className={`text-[9px] font-normal mt-0.5 ${paymentMethod === 'COD' ? 'text-slate-300' : 'text-slate-500'}`}>Cash / UPI at doorstep</span>
                     </button>
 
                     <button
@@ -1227,12 +1266,12 @@ export default function CreateOrderWizardModal({
                       onClick={() => setPaymentMethod('UPI')}
                       className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center transition-all ${
                         paymentMethod === 'UPI'
-                          ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 shadow-md ring-1 ring-emerald-500/30'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                          ? 'bg-black text-white border-black shadow-md'
+                          : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                       }`}
                     >
-                      <span className="text-xs font-extrabold">UPI / Cards</span>
-                      <span className="text-[9px] font-normal text-slate-400 mt-0.5">Instant Online Payment</span>
+                      <span className="text-xs font-black">UPI / Cards</span>
+                      <span className={`text-[9px] font-normal mt-0.5 ${paymentMethod === 'UPI' ? 'text-slate-300' : 'text-slate-500'}`}>Instant Online Payment</span>
                     </button>
 
                     <button
@@ -1240,12 +1279,12 @@ export default function CreateOrderWizardModal({
                       onClick={() => setPaymentMethod('ESCROW')}
                       className={`p-3 rounded-xl border flex flex-col items-center justify-center text-center transition-all ${
                         paymentMethod === 'ESCROW'
-                          ? 'bg-emerald-600/20 border-emerald-500 text-emerald-300 shadow-md ring-1 ring-emerald-500/30'
-                          : 'bg-slate-950 border-slate-800 text-slate-400 hover:text-white'
+                          ? 'bg-black text-white border-black shadow-md'
+                          : 'bg-slate-50 border-slate-300 text-slate-700 hover:bg-slate-100'
                       }`}
                     >
-                      <span className="text-xs font-extrabold">UOP Escrow</span>
-                      <span className="text-[9px] font-normal text-slate-400 mt-0.5">Protected Release</span>
+                      <span className="text-xs font-black">UOP Escrow</span>
+                      <span className={`text-[9px] font-normal mt-0.5 ${paymentMethod === 'ESCROW' ? 'text-slate-300' : 'text-slate-500'}`}>Protected Release</span>
                     </button>
                   </div>
                 </div>
@@ -1256,7 +1295,7 @@ export default function CreateOrderWizardModal({
                     type="button"
                     onClick={handleSubmit}
                     disabled={loading || (deliveryCalcResult !== null && !deliveryCalcResult.is_eligible)}
-                    className="w-full py-4 rounded-2xl bg-gradient-to-r from-emerald-600 via-teal-600 to-blue-600 hover:from-emerald-500 hover:to-blue-500 text-white font-extrabold text-base flex items-center justify-center gap-2.5 shadow-xl shadow-emerald-600/30 transition-all disabled:opacity-50"
+                    className="w-full py-4 rounded-2xl bg-black hover:bg-slate-800 text-white font-black text-base flex items-center justify-center gap-2.5 shadow-md transition-all disabled:opacity-50"
                   >
                     {loading ? (
                       <>

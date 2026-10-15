@@ -418,6 +418,16 @@ type ProviderOfferResponse struct {
 
 func (h *CategoryHandler) GetProviderOffers(w http.ResponseWriter, r *http.Request) {
 	slug := chi.URLParam(r, "slug")
+	if slug == "" {
+		slug = r.URL.Query().Get("category_id")
+	}
+	if slug == "" {
+		slug = r.URL.Query().Get("category")
+	}
+	if slug == "" {
+		slug = r.URL.Query().Get("slug")
+	}
+
 	latStr := r.URL.Query().Get("lat")
 	lngStr := r.URL.Query().Get("lng")
 	qtyStr := r.URL.Query().Get("quantity")
@@ -448,8 +458,8 @@ func (h *CategoryHandler) GetProviderOffers(w http.ResponseWriter, r *http.Reque
 		FROM user_skills_assets sa
 		JOIN users u ON sa.user_id = u.id
 		LEFT JOIN categories c ON (sa.category_id = c.id OR LOWER(c.slug) = REPLACE(LOWER(sa.asset_type), '_', '-'))
-		WHERE (c.slug = $3 OR sa.asset_type = $3 OR LOWER(sa.asset_type) = REPLACE(LOWER($3), '-', '_'))
-		  AND sa.status = 'ACTIVE'
+		WHERE ($3 = '' OR c.slug = $3 OR sa.asset_type = $3 OR LOWER(sa.asset_type) = REPLACE(LOWER($3), '-', '_'))
+		  AND sa.status IN ('ACTIVE', 'APPROVED')
 		  AND sa.is_available = TRUE;
 	`
 

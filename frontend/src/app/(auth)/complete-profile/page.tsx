@@ -68,20 +68,20 @@ export default function CompleteProfilePage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex items-center justify-center p-6 selection:bg-purple-500 selection:text-white">
-      <div className="glass-panel p-8 sm:p-10 rounded-3xl border border-slate-800 w-full max-w-lg space-y-6 shadow-2xl">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6">
+      <div className="bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 w-full max-w-lg space-y-6 shadow-xl">
         <div className="text-center">
-          <div className="w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center mx-auto mb-4">
-            <UserCheck className="w-7 h-7 text-purple-400" />
+          <div className="w-14 h-14 rounded-2xl bg-black text-white flex items-center justify-center mx-auto mb-4 shadow-md">
+            <UserCheck className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white">Complete Profile Details</h1>
-          <p className="text-slate-400 text-xs sm:text-sm mt-2">
+          <h1 className="text-2xl font-black text-slate-900">Complete Profile Details</h1>
+          <p className="text-slate-600 text-xs sm:text-sm mt-2">
             Step 2 of 3: Provide a profile photo, address, and Aadhaar number before final face verification activation.
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs text-center font-medium">
+          <div className="p-3.5 rounded-xl bg-rose-50 border border-rose-200 text-rose-700 text-xs text-center font-medium">
             {error}
           </div>
         )}
@@ -93,61 +93,61 @@ export default function CompleteProfilePage() {
               <img
                 src={avatarUrl}
                 alt="Profile Avatar"
-                className="w-24 h-24 rounded-full object-cover border-2 border-purple-500 shadow-lg shadow-purple-500/20"
+                className="w-24 h-24 rounded-full object-cover border-2 border-slate-900 shadow-md"
               />
-              <div className="absolute bottom-0 right-0 p-2 bg-purple-600 rounded-full text-white shadow-md">
+              <div className="absolute bottom-0 right-0 p-2 bg-black rounded-full text-white shadow-md">
                 <Camera className="w-4 h-4" />
               </div>
             </div>
-            <span className="text-xs text-purple-400 font-semibold uppercase tracking-wider">Passport-size Photo / URL *</span>
+            <span className="text-xs text-slate-600 font-semibold uppercase tracking-wider">Passport-size Photo / URL *</span>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Profile Photo URL *</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Profile Photo URL *</label>
             <input
               type="url"
               value={avatarUrl}
               onChange={(e) => setAvatarUrl(e.target.value)}
-              className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500"
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
               required
             />
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Aadhaar Identity Number (Optional - Required for Providers)</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Aadhaar Identity Number (Optional - Required for Providers)</label>
             <div className="relative">
               <input
                 type="text"
                 value={aadhaarNumber}
                 onChange={(e) => setAadhaarNumber(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500 font-mono"
+                className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black font-mono"
                 placeholder="1234-5678-9012 (Optional)"
               />
-              <FileText className="w-4 h-4 text-purple-400 absolute left-3.5 top-3.5" />
+              <FileText className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Primary Address / PostGIS Location *</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Primary Address / PostGIS Location *</label>
             <div className="relative">
               <input
                 type="text"
                 value={addressText}
                 onChange={(e) => setAddressText(e.target.value)}
-                className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500"
+                className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black"
                 required
               />
-              <MapPin className="w-4 h-4 text-rose-400 absolute left-3.5 top-3.5" />
+              <MapPin className="w-4 h-4 text-slate-400 absolute left-3.5 top-3.5" />
             </div>
           </div>
 
           <div>
-            <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Bio / Overview (Optional)</label>
+            <label className="block text-xs font-semibold text-slate-600 uppercase tracking-wider mb-2">Bio / Overview (Optional)</label>
             <textarea
               value={bio}
               onChange={(e) => setBio(e.target.value)}
               rows={2}
-              className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500 resize-none"
+              className="w-full px-4 py-3 rounded-xl bg-slate-50 border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black focus:ring-1 focus:ring-black resize-none"
               placeholder="Describe your services or background..."
             />
           </div>
@@ -155,7 +155,7 @@ export default function CompleteProfilePage() {
           <button
             type="submit"
             disabled={loading}
-            className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:opacity-95 text-white font-bold text-sm transition-all shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
+            className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-sm transition-all shadow-md flex items-center justify-center gap-2"
           >
             {loading ? (
               <>

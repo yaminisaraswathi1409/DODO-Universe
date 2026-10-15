@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,6 +32,32 @@ func (r *OpportunityRepository) GetCategoryByID(ctx context.Context, id uuid.UUI
 		WHERE id = $1;
 	`
 	row := r.db.Pool.QueryRow(ctx, query, id)
+	var c domain.Category
+	if err := row.Scan(&c.ID, &c.Slug, &c.Name, &c.Description, &c.Icon, &c.DefaultWorkflow, &c.RequiredDocuments, &c.OpportunityFields, &c.VehicleFields, &c.DriverFields, &c.ResourceRequirements, &c.Resources, &c.RelatedServices, &c.CreatedAt); err != nil {
+		return nil, err
+	}
+	return &c, nil
+}
+
+func (r *OpportunityRepository) GetCategoryBySlugOrName(ctx context.Context, identifier string) (*domain.Category, error) {
+	ident := strings.TrimSpace(identifier)
+	if ident == "" {
+		return nil, fmt.Errorf("empty category identifier")
+	}
+	query := `
+		SELECT id, slug, name, COALESCE(description, ''), COALESCE(icon, ''), default_workflow,
+		       COALESCE(required_documents, '[]'::jsonb), COALESCE(opportunity_fields, '[]'::jsonb),
+		       COALESCE(vehicle_fields, '[]'::jsonb), COALESCE(driver_fields, '[]'::jsonb),
+		       COALESCE(resource_requirements, '{}'::jsonb), COALESCE(resources, '[]'::jsonb),
+		       COALESCE(related_services, '[]'::jsonb), created_at
+		FROM categories
+		WHERE LOWER(slug) = LOWER($1)
+		   OR LOWER(name) = LOWER($1)
+		   OR LOWER(slug) = LOWER(REPLACE($1, ' ', '-'))
+		   OR LOWER(slug) = LOWER(REPLACE($1, '_', '-'))
+		LIMIT 1;
+	`
+	row := r.db.Pool.QueryRow(ctx, query, ident)
 	var c domain.Category
 	if err := row.Scan(&c.ID, &c.Slug, &c.Name, &c.Description, &c.Icon, &c.DefaultWorkflow, &c.RequiredDocuments, &c.OpportunityFields, &c.VehicleFields, &c.DriverFields, &c.ResourceRequirements, &c.Resources, &c.RelatedServices, &c.CreatedAt); err != nil {
 		return nil, err
@@ -118,11 +145,13 @@ func (r *OpportunityRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 		       o.parent_opportunity_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
 		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score,
 		       COALESCE(au.full_name, ''), COALESCE(au.phone, ''), COALESCE(au.avatar_url, ''),
-		       COALESCE(tv.full_name, ''), COALESCE(tv.phone, ''), COALESCE(tv.avatar_url, '')
+		       COALESCE(tv.full_name, ''), COALESCE(tv.phone, ''), COALESCE(tv.avatar_url, ''),
+		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb), COALESCE(c.opportunity_fields, '[]'::jsonb)
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
 		LEFT JOIN users au ON o.assigned_user_id = au.id
 		LEFT JOIN users tv ON o.target_vendor_id = tv.id
+		LEFT JOIN categories c ON o.category_id = c.id
 		WHERE o.id = $1;
 	`
 
@@ -132,6 +161,7 @@ func (r *OpportunityRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 	var u domain.User
 	var au domain.User
 	var tv domain.User
+	var cat domain.Category
 	err := row.Scan(
 		&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.TargetVendorID, &opp.CatalogItemID, &opp.CategoryID, &opp.Type, &opp.OrderMode, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
 		&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.Quantity, &opp.UnitPrice, &opp.TotalPrice, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
@@ -139,6 +169,7 @@ func (r *OpportunityRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 		&u.FullName, &u.Phone, &u.AvatarURL, &u.TrustScore,
 		&au.FullName, &au.Phone, &au.AvatarURL,
 		&tv.FullName, &tv.Phone, &tv.AvatarURL,
+		&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements, &cat.OpportunityFields,
 	)
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -157,6 +188,12 @@ func (r *OpportunityRepository) GetByID(ctx context.Context, id uuid.UUID) (*dom
 	if opp.TargetVendorID != nil {
 		tv.ID = *opp.TargetVendorID
 		opp.TargetVendor = &tv
+	}
+	if opp.CategoryID != nil || cat.Name != "" {
+		if opp.CategoryID != nil {
+			cat.ID = *opp.CategoryID
+		}
+		opp.Category = &cat
 	}
 
 	return &opp, nil
@@ -512,17 +549,24 @@ func (r *OpportunityRepository) FindCommuterRouteMatches(ctx context.Context, ne
 
 // FindEligibleProvidersForCategory queries approved/active providers for a given category
 func (r *OpportunityRepository) FindEligibleProvidersForCategory(ctx context.Context, categoryID *uuid.UUID) ([]*domain.User, error) {
+	if categoryID == nil {
+		return []*domain.User{}, nil
+	}
 	query := `
 		SELECT DISTINCT u.id, u.full_name, COALESCE(u.phone, ''), COALESCE(u.email, ''), COALESCE(u.avatar_url, ''), u.trust_score
 		FROM user_skills_assets usa
 		JOIN users u ON usa.user_id = u.id
 		LEFT JOIN categories c ON c.id = $1
 		WHERE (
-			$1::uuid IS NULL
-			OR usa.category_id = $1
-			OR (c.slug IS NOT NULL AND LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_'))
+			usa.category_id = $1
+			OR (c.slug IS NOT NULL AND (
+				LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_')
+				OR LOWER(usa.asset_type) LIKE REPLACE(LOWER(c.slug), '-', '_') || '%'
+				OR REPLACE(LOWER(c.slug), '-', '_') LIKE LOWER(usa.asset_type) || '%'
+				OR LOWER(usa.title) ILIKE '%' || LOWER(c.name) || '%'
+			))
 		)
-		  AND usa.status = 'ACTIVE'
+		  AND usa.status IN ('APPROVED', 'ACTIVE')
 		  AND usa.is_available = TRUE;
 	`
 	rows, err := r.db.Pool.Query(ctx, query, categoryID)
@@ -556,28 +600,34 @@ func (r *OpportunityRepository) SaveOpportunityMatch(ctx context.Context, oppID,
 // GetMatchingRequestsForProvider gets unaccepted matching requests for a provider's approved services
 func (r *OpportunityRepository) GetMatchingRequestsForProvider(ctx context.Context, providerID uuid.UUID) ([]*domain.Opportunity, error) {
 	query := `
-		SELECT DISTINCT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, o.title, o.description, o.workflow_model, o.status,
+		SELECT DISTINCT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, COALESCE(o.order_mode, 'GENERAL_BROADCAST'), o.title, o.description, o.workflow_model, o.status,
 		       ST_Y(o.location::geometry) as lat, ST_X(o.location::geometry) as lng, COALESCE(o.address_text, ''),
-		       o.radius_km, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
-		       o.parent_opportunity_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
+		       o.radius_km, o.quantity, o.unit_price, o.total_price, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
+		       o.parent_opportunity_id, o.target_vendor_id, o.catalog_item_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
 		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score,
-		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb)
+		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb), COALESCE(c.opportunity_fields, '[]'::jsonb)
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
 		LEFT JOIN categories c ON o.category_id = c.id
 		JOIN user_skills_assets usa ON (
 			(o.category_id IS NOT NULL AND usa.category_id = o.category_id)
-			OR (c.slug IS NOT NULL AND LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_'))
-			OR usa.category_id IS NULL
+			OR (c.slug IS NOT NULL AND (
+				LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_')
+				OR LOWER(usa.asset_type) LIKE REPLACE(LOWER(c.slug), '-', '_') || '%'
+				OR REPLACE(LOWER(c.slug), '-', '_') LIKE LOWER(usa.asset_type) || '%'
+				OR LOWER(usa.title) ILIKE '%' || LOWER(c.name) || '%'
+			))
+			OR EXISTS (SELECT 1 FROM opportunity_matches om WHERE om.opportunity_id = o.id AND om.matched_user_id = $1)
 		)
 		WHERE usa.user_id = $1
-		  AND usa.status = 'ACTIVE'
+		  AND usa.status IN ('APPROVED', 'ACTIVE')
 		  AND usa.is_available = TRUE
 		  AND o.type = 'NEED'
 		  AND o.user_id != $1
 		  AND o.assigned_user_id IS NULL
+		  AND (o.target_vendor_id IS NULL OR o.target_vendor_id = $1)
 		  AND o.status IN ('OPEN', 'OPEN_NEED', 'PENDING_MATCHING', 'ORDER_PLACED')
-
+		  AND (o.parent_opportunity_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM opportunities child WHERE child.parent_opportunity_id = o.id))
 		ORDER BY o.created_at DESC;
 	`
 	rows, err := r.db.Pool.Query(ctx, query, providerID)
@@ -592,19 +642,21 @@ func (r *OpportunityRepository) GetMatchingRequestsForProvider(ctx context.Conte
 		var u domain.User
 		var cat domain.Category
 		err := rows.Scan(
-			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
-			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
-			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
+			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.OrderMode, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
+			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.Quantity, &opp.UnitPrice, &opp.TotalPrice, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
+			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.TargetVendorID, &opp.CatalogItemID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
 			&u.FullName, &u.Phone, &u.AvatarURL, &u.TrustScore,
-			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements,
+			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements, &cat.OpportunityFields,
 		)
 		if err != nil {
 			return nil, err
 		}
 		u.ID = opp.UserID
 		opp.User = &u
-		if opp.CategoryID != nil {
-			cat.ID = *opp.CategoryID
+		if opp.CategoryID != nil || cat.Name != "" {
+			if opp.CategoryID != nil {
+				cat.ID = *opp.CategoryID
+			}
 			opp.Category = &cat
 		}
 		opps = append(opps, &opp)
@@ -615,16 +667,17 @@ func (r *OpportunityRepository) GetMatchingRequestsForProvider(ctx context.Conte
 // GetAcceptedOrdersForProvider gets orders assigned to and accepted by this provider
 func (r *OpportunityRepository) GetAcceptedOrdersForProvider(ctx context.Context, providerID uuid.UUID) ([]*domain.Opportunity, error) {
 	query := `
-		SELECT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, o.title, o.description, o.workflow_model, o.status,
+		SELECT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, COALESCE(o.order_mode, 'GENERAL_BROADCAST'), o.title, o.description, o.workflow_model, o.status,
 		       ST_Y(o.location::geometry) as lat, ST_X(o.location::geometry) as lng, COALESCE(o.address_text, ''),
-		       o.radius_km, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
-		       o.parent_opportunity_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
+		       o.radius_km, o.quantity, o.unit_price, o.total_price, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
+		       o.parent_opportunity_id, o.target_vendor_id, o.catalog_item_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
 		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score,
-		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb)
+		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb), COALESCE(c.opportunity_fields, '[]'::jsonb)
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
 		LEFT JOIN categories c ON o.category_id = c.id
-		WHERE o.assigned_user_id = $1
+		WHERE (o.assigned_user_id = $1 OR (o.target_vendor_id = $1 AND o.status NOT IN ('OPEN', 'OPEN_NEED', 'PENDING_MATCHING', 'ORDER_PLACED', 'CANCELLED', 'REJECTED')))
+		  AND (o.parent_opportunity_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM opportunities child WHERE child.parent_opportunity_id = o.id))
 		ORDER BY o.updated_at DESC;
 	`
 	rows, err := r.db.Pool.Query(ctx, query, providerID)
@@ -639,19 +692,21 @@ func (r *OpportunityRepository) GetAcceptedOrdersForProvider(ctx context.Context
 		var u domain.User
 		var cat domain.Category
 		err := rows.Scan(
-			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
-			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
-			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
+			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.OrderMode, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
+			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.Quantity, &opp.UnitPrice, &opp.TotalPrice, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
+			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.TargetVendorID, &opp.CatalogItemID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
 			&u.FullName, &u.Phone, &u.AvatarURL, &u.TrustScore,
-			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements,
+			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements, &cat.OpportunityFields,
 		)
 		if err != nil {
 			return nil, err
 		}
 		u.ID = opp.UserID
 		opp.User = &u
-		if opp.CategoryID != nil {
-			cat.ID = *opp.CategoryID
+		if opp.CategoryID != nil || cat.Name != "" {
+			if opp.CategoryID != nil {
+				cat.ID = *opp.CategoryID
+			}
 			opp.Category = &cat
 		}
 		opps = append(opps, &opp)
@@ -704,14 +759,16 @@ func (r *OpportunityRepository) UpdateMetadata(ctx context.Context, id uuid.UUID
 // GetUserOpportunities gets orders created by the specified customer (user_id = $1)
 func (r *OpportunityRepository) GetUserOpportunities(ctx context.Context, userID uuid.UUID) ([]*domain.Opportunity, error) {
 	query := `
-		SELECT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, o.title, o.description, o.workflow_model, o.status,
+		SELECT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, COALESCE(o.order_mode, 'GENERAL_BROADCAST'), o.title, o.description, o.workflow_model, o.status,
 		       ST_Y(o.location::geometry) as lat, ST_X(o.location::geometry) as lng, COALESCE(o.address_text, ''),
-		       o.radius_km, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
-		       o.parent_opportunity_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
+		       o.radius_km, o.quantity, o.unit_price, o.total_price, o.budget_min, o.budget_max, o.price_unit, o.scheduled_start, o.scheduled_end,
+		       o.parent_opportunity_id, o.target_vendor_id, o.catalog_item_id, COALESCE(o.metadata, '{}'::jsonb), o.created_at, o.updated_at,
 		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score,
-		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb)
+		       COALESCE(au.full_name, ''), COALESCE(au.phone, ''), COALESCE(au.avatar_url, ''),
+		       COALESCE(c.name, ''), COALESCE(c.slug, ''), COALESCE(c.resources, '[]'::jsonb), COALESCE(c.resource_requirements, '{}'::jsonb), COALESCE(c.opportunity_fields, '[]'::jsonb)
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
+		LEFT JOIN users au ON o.assigned_user_id = au.id
 		LEFT JOIN categories c ON o.category_id = c.id
 		WHERE o.user_id = $1
 		ORDER BY o.created_at DESC;
@@ -726,25 +783,77 @@ func (r *OpportunityRepository) GetUserOpportunities(ctx context.Context, userID
 	for rows.Next() {
 		var opp domain.Opportunity
 		var u domain.User
+		var au domain.User
 		var cat domain.Category
 		err := rows.Scan(
-			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
-			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
-			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
+			&opp.ID, &opp.UserID, &opp.AssignedUserID, &opp.CategoryID, &opp.Type, &opp.OrderMode, &opp.Title, &opp.Description, &opp.WorkflowModel, &opp.Status,
+			&opp.Lat, &opp.Lng, &opp.AddressText, &opp.RadiusKM, &opp.Quantity, &opp.UnitPrice, &opp.TotalPrice, &opp.BudgetMin, &opp.BudgetMax, &opp.PriceUnit,
+			&opp.ScheduledStart, &opp.ScheduledEnd, &opp.ParentOpportunityID, &opp.TargetVendorID, &opp.CatalogItemID, &opp.Metadata, &opp.CreatedAt, &opp.UpdatedAt,
 			&u.FullName, &u.Phone, &u.AvatarURL, &u.TrustScore,
-			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements,
+			&au.FullName, &au.Phone, &au.AvatarURL,
+			&cat.Name, &cat.Slug, &cat.Resources, &cat.ResourceRequirements, &cat.OpportunityFields,
 		)
 		if err != nil {
 			return nil, err
 		}
 		u.ID = opp.UserID
 		opp.User = &u
-		if opp.CategoryID != nil {
-			cat.ID = *opp.CategoryID
+		if opp.AssignedUserID != nil && *opp.AssignedUserID != uuid.Nil {
+			au.ID = *opp.AssignedUserID
+			opp.AssignedUser = &au
+		}
+		if opp.CategoryID != nil || cat.Name != "" {
+			if opp.CategoryID != nil {
+				cat.ID = *opp.CategoryID
+			}
 			opp.Category = &cat
 		}
 		opps = append(opps, &opp)
 	}
 	return opps, nil
 }
+
+// GetChildrenByParentID retrieves all direct child opportunities of a parent opportunity
+func (r *OpportunityRepository) GetChildrenByParentID(ctx context.Context, parentID uuid.UUID) ([]*domain.Opportunity, error) {
+	query := `
+		SELECT id, user_id, category_id, type, title, description, workflow_model, status,
+		       ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng, COALESCE(address_text, ''),
+		       radius_km, budget_min, budget_max, price_unit, scheduled_start, scheduled_end,
+		       parent_opportunity_id, COALESCE(metadata, '{}'::jsonb), created_at, updated_at
+		FROM opportunities
+		WHERE parent_opportunity_id = $1
+		ORDER BY created_at ASC;
+	`
+	rows, err := r.db.Pool.Query(ctx, query, parentID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query child opportunities: %w", err)
+	}
+	defer rows.Close()
+
+	var children []*domain.Opportunity
+	for rows.Next() {
+		var child domain.Opportunity
+		if err := rows.Scan(
+			&child.ID, &child.UserID, &child.CategoryID, &child.Type, &child.Title, &child.Description, &child.WorkflowModel, &child.Status,
+			&child.Lat, &child.Lng, &child.AddressText, &child.RadiusKM, &child.BudgetMin, &child.BudgetMax, &child.PriceUnit,
+			&child.ScheduledStart, &child.ScheduledEnd, &child.ParentOpportunityID, &child.Metadata, &child.CreatedAt, &child.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		children = append(children, &child)
+	}
+	return children, nil
+}
+
+// CreateChainLink records a parent-child relationship in opportunity_chains table
+func (r *OpportunityRepository) CreateChainLink(ctx context.Context, parentID, childID uuid.UUID, relType string) error {
+	query := `
+		INSERT INTO opportunity_chains (parent_opportunity_id, child_opportunity_id, relationship_type)
+		VALUES ($1, $2, $3)
+		ON CONFLICT (parent_opportunity_id, child_opportunity_id) DO NOTHING;
+	`
+	_, err := r.db.Pool.Exec(ctx, query, parentID, childID, relType)
+	return err
+}
+
 

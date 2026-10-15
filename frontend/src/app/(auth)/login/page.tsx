@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { requestOTP, verifyOTP, UserProfile } from '@/lib/api';
+import { requestOTP, verifyOTP, UserProfile, getStoredUser, saveUserSession } from '@/lib/api';
 import { Smartphone, ShieldCheck, ArrowRight, RefreshCw, Zap, ShieldAlert } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 export default function UserLoginPage() {
   const router = useRouter();
@@ -17,18 +18,15 @@ export default function UserLoginPage() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('uop_user');
-      if (stored) {
-        try {
-          const user: UserProfile = JSON.parse(stored);
-          if (user && (user.status === 'ACTIVE' || user.is_verified || user.role)) {
-            if (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN') {
-              router.replace('/admin/users');
-            } else {
-              router.replace('/dashboard');
-            }
+      const user = getStoredUser();
+      if (user && (user.status === 'ACTIVE' || user.is_verified || user.role)) {
+        if (window.history.length <= 1) {
+          if (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN') {
+            router.push('/admin/users');
+          } else {
+            router.push('/dashboard');
           }
-        } catch (e) {}
+        }
       }
     }
   }, [router]);
@@ -36,7 +34,7 @@ export default function UserLoginPage() {
   const routeUserByStatus = (user: UserProfile) => {
     // CASE 1: Admin users route to Admin Dashboard
     if (user.role === 'SUPER_ADMIN' || user.role === 'ADMIN') {
-      router.replace('/admin/users');
+      router.push('/admin/users');
       return;
     }
 
@@ -47,13 +45,14 @@ export default function UserLoginPage() {
     }
 
     // CASE 3: Existing users logging in go directly to User Dashboard
-    router.replace('/dashboard');
+    router.push('/dashboard');
   };
 
   const handleRequestOTP = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phone) {
-      setError('Please enter a valid mobile number');
+    const phoneValidation = validatePhoneNumber(phone);
+    if (!phoneValidation.isValid) {
+      setError(phoneValidation.error || 'Please enter a valid mobile number');
       return;
     }
 
@@ -95,11 +94,8 @@ export default function UserLoginPage() {
         return;
       }
 
-      // Save local user session
-      if (typeof window !== 'undefined') {
-        localStorage.setItem('uop_user', JSON.stringify(user));
-        localStorage.setItem('uop_phone', phone);
-      }
+      // Save local user session using standardized session helper
+      saveUserSession(user);
 
       routeUserByStatus(user);
     } catch (err: any) {
@@ -110,27 +106,27 @@ export default function UserLoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex items-center justify-center p-6 selection:bg-blue-500 selection:text-white">
-      <div className="glass-panel p-8 sm:p-10 rounded-3xl border border-slate-800 w-full max-w-md space-y-6 shadow-2xl">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6 font-sans selection:bg-slate-900 selection:text-white">
+      <div className="bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 w-full max-w-md space-y-6 shadow-sm">
         <div className="text-center">
-          <div className="w-12 h-12 rounded-xl bg-gradient-to-tr from-blue-600 via-indigo-500 to-purple-600 flex items-center justify-center mx-auto mb-4 shadow-lg shadow-blue-500/30">
+          <div className="w-12 h-12 rounded-xl bg-black flex items-center justify-center mx-auto mb-4 shadow-sm">
             <Zap className="w-6 h-6 text-white" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white">User Login</h1>
-          <p className="text-slate-400 text-xs sm:text-sm mt-1.5">
+          <h1 className="text-2xl font-extrabold text-slate-900">User Login</h1>
+          <p className="text-slate-500 text-xs sm:text-sm mt-1.5">
             Enter your mobile number to receive your OTP code.
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs text-center font-medium flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 shrink-0 text-rose-400" />
+          <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-300 text-slate-900 text-xs text-center font-medium flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 shrink-0 text-slate-900" />
             <span>{error}</span>
           </div>
         )}
 
         {demoOtp && step === 'OTP' && (
-          <div className="p-3.5 rounded-xl bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs text-center font-mono">
+          <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-200 text-slate-900 text-xs text-center font-mono">
             Demo OTP Code Dispatched: <strong className="text-sm underline">{demoOtp}</strong>
           </div>
         )}
@@ -138,24 +134,27 @@ export default function UserLoginPage() {
         {step === 'PHONE' ? (
           <form onSubmit={handleRequestOTP} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Mobile Phone Number</label>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">Mobile Phone Number</label>
               <div className="relative">
                 <input
-                  type="text"
+                  type="tel"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-blue-500 font-mono"
+                  onChange={(e) => {
+                    setError('');
+                    setPhone(sanitizePhoneInput(e.target.value));
+                  }}
+                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black font-mono"
                   placeholder="+919876543210"
                   required
                 />
-                <Smartphone className="w-4 h-4 text-blue-400 absolute left-3.5 top-3.5" />
+                <Smartphone className="w-4 h-4 text-slate-700 absolute left-3.5 top-3.5" />
               </div>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -170,16 +169,16 @@ export default function UserLoginPage() {
               )}
             </button>
 
-            <div className="pt-4 border-t border-slate-800 text-center space-y-2">
-              <p className="text-xs text-slate-400">
+            <div className="pt-4 border-t border-slate-200 text-center space-y-2">
+              <p className="text-xs text-slate-500">
                 Don&apos;t have an account?{' '}
-                <Link href="/signup" className="text-purple-400 font-semibold hover:underline">
+                <Link href="/signup" className="text-slate-900 font-bold hover:underline">
                   Sign up here →
                 </Link>
               </p>
               <div className="pt-1">
                 <span className="text-xs text-slate-500">System Administrator? </span>
-                <Link href="/admin/login" className="text-xs text-purple-400 font-semibold hover:underline">
+                <Link href="/admin/login" className="text-xs text-slate-900 font-bold hover:underline">
                   Admin Portal Login →
                 </Link>
               </div>
@@ -188,13 +187,13 @@ export default function UserLoginPage() {
         ) : (
           <form onSubmit={handleVerifyOTP} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">6-Digit OTP Code</label>
               <input
                 type="text"
                 maxLength={6}
                 value={otp}
                 onChange={(e) => setOtp(e.target.value)}
-                className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-center tracking-[0.5em] font-mono text-xl text-blue-400 focus:outline-none focus:border-blue-500"
+                className="w-full px-4 py-3 rounded-xl bg-white border border-slate-300 text-center tracking-[0.5em] font-mono text-xl text-slate-900 focus:outline-none focus:border-black"
                 placeholder="123456"
                 required
               />
@@ -203,7 +202,7 @@ export default function UserLoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-500 hover:to-indigo-500 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-lg shadow-blue-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 disabled:opacity-50 text-white font-bold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -221,7 +220,7 @@ export default function UserLoginPage() {
             <button
               type="button"
               onClick={() => setStep('PHONE')}
-              className="w-full text-xs text-slate-400 hover:text-white font-medium py-1"
+              className="w-full text-xs text-slate-600 hover:text-black font-medium py-1"
             >
               ← Change Mobile Number
             </button>

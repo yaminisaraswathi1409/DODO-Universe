@@ -1,6 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import { UserProfile, UserServiceAsset, VendorCatalogItem, Category, getVendorCatalog, getCategories } from '@/lib/api';
 import { useCart } from '@/context/CartContext';
 import {
@@ -25,6 +26,7 @@ import {
   Tag,
   ChevronRight,
   Sparkles,
+  AlertCircle,
 } from 'lucide-react';
 
 export interface VendorSellingOption {
@@ -84,6 +86,11 @@ interface VendorStorefrontModalProps {
     asset: UserServiceAsset,
     selectedOption?: VendorSellingOption
   ) => void;
+  onSwitchToRequestWhatYouNeed?: (
+    categorySlug?: string,
+    initialQuantity?: number,
+    itemTitle?: string
+  ) => void;
 }
 
 export default function VendorStorefrontModal({
@@ -93,7 +100,10 @@ export default function VendorStorefrontModal({
   initialVendorUser,
   onSelectCatalogItemForOrder,
   onSelectServiceForOrder,
+  onSwitchToRequestWhatYouNeed,
 }: VendorStorefrontModalProps) {
+  const router = useRouter();
+  const searchParams = useSearchParams();
   const { addToCart } = useCart();
   const [loading, setLoading] = useState(false);
   const [vendor, setVendor] = useState<UserProfile | null>(initialVendorUser || null);
@@ -101,10 +111,21 @@ export default function VendorStorefrontModal({
   const [items, setItems] = useState<VendorCatalogItem[]>([]);
   const [categories, setCategories] = useState<Category[]>([]);
 
-  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(null);
-  const [selectedOptionId, setSelectedOptionId] = useState<string | null>(null);
+  const catParam = searchParams ? searchParams.get('cat') : null;
+  const optParam = searchParams ? searchParams.get('opt') : null;
+
+  const [selectedCategoryKey, setSelectedCategoryKey] = useState<string | null>(catParam || null);
+  const [selectedOptionId, setSelectedOptionId] = useState<string | null>(optParam || null);
   const [quantity, setQuantity] = useState<number>(1);
   const [addedNotice, setAddedNotice] = useState<string | null>(null);
+
+  // MOQ Warning state when quantity < offering MOQ
+  const [moqWarning, setMoqWarning] = useState<{
+    itemTitle: string;
+    moq: number;
+    requestedQty: number;
+    categorySlug?: string;
+  } | null>(null);
 
   // Selected Add-ons per Option ID map: { [optionId]: string[] (addon_ids) }
   const [selectedAddonsMap, setSelectedAddonsMap] = useState<Record<string, string[]>>({});
@@ -112,8 +133,6 @@ export default function VendorStorefrontModal({
   useEffect(() => {
     if (isOpen && vendorId) {
       setLoading(true);
-      setSelectedCategoryKey(null);
-      setSelectedOptionId(null);
       setQuantity(1);
       setSelectedAddonsMap({});
 
@@ -129,7 +148,7 @@ export default function VendorStorefrontModal({
             setVendor(data.vendor);
 
             const activeServices = (data.assets || []).filter(
-              (a) => a.status === 'ACTIVE' && a.is_available
+              (a) => (a.status === 'ACTIVE' || a.status === 'APPROVED') && a.is_available
             );
             setAssets(activeServices);
             setItems(data.items || []);
@@ -139,23 +158,25 @@ export default function VendorStorefrontModal({
     }
   }, [isOpen, vendorId]);
 
+  // Lock background body scrolling ONLY when modal is open
   useEffect(() => {
     if (!isOpen) return;
-
-    const handlePopState = () => {
-      if (selectedCategoryKey) {
-        setSelectedCategoryKey(null);
-        setSelectedOptionId(null);
-      } else {
-        onClose();
-      }
-    };
-
-    window.addEventListener('popstate', handlePopState);
+    const origOverflow = document.body.style.overflow;
+    const origDocOverflow = document.documentElement.style.overflow;
+    document.body.style.overflow = 'hidden';
+    document.documentElement.style.overflow = 'hidden';
     return () => {
-      window.removeEventListener('popstate', handlePopState);
+      document.body.style.overflow = origOverflow;
+      document.documentElement.style.overflow = origDocOverflow;
     };
-  }, [isOpen, selectedCategoryKey, onClose]);
+  }, [isOpen]);
+
+  // Sync state with URL search parameters (enables Browser Back & Forward for Category & Option selection)
+  useEffect(() => {
+    if (!isOpen) return;
+    setSelectedCategoryKey(catParam || null);
+    setSelectedOptionId(optParam || null);
+  }, [isOpen, catParam, optParam]);
 
   if (!isOpen) return null;
 
@@ -334,7 +355,7 @@ export default function VendorStorefrontModal({
     });
 
     assets.forEach((asset) => {
-      if (asset.status !== 'ACTIVE' || !asset.is_available) return;
+      if ((asset.status !== 'ACTIVE' && asset.status !== 'APPROVED') || !asset.is_available) return;
 
       const resolvedCat = asset.category || (asset.category_id ? categories.find((c) => c.id === asset.category_id) : undefined);
       const catName = resolvedCat?.name || asset.category?.name || asset.asset_type || 'Transportation & Logistics';
@@ -379,7 +400,56 @@ export default function VendorStorefrontModal({
   };
 
   const categoryGroups = getCategoryGroups();
-  const selectedGroup = categoryGroups.find((g) => g.key === selectedCategoryKey);
+  const selectedGroup = categoryGroups.find(
+    (g) =>
+      g.key === selectedCategoryKey ||
+      g.key === `cat_${selectedCategoryKey}` ||
+      g.key.replace('cat_', '') === selectedCategoryKey
+  );
+
+  const handleSelectCategoryGroup = (groupKey: string, firstOptId: string | null) => {
+    setSelectedCategoryKey(groupKey);
+    setSelectedOptionId(firstOptId);
+    setQuantity(1);
+
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    params.set('cat', groupKey);
+    if (firstOptId) {
+      params.set('opt', firstOptId);
+    } else {
+      params.delete('opt');
+    }
+    router.push(`/opportunities?${params.toString()}`);
+  };
+
+  const handleSelectOptionCard = (optId: string) => {
+    setSelectedOptionId(optId);
+
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    params.set('opt', optId);
+    router.push(`/opportunities?${params.toString()}`);
+  };
+
+  const handleCloseModal = () => {
+    if (searchParams && (searchParams.has('vendor_id') || searchParams.has('cat') || searchParams.has('opt'))) {
+      const params = new URLSearchParams(searchParams.toString());
+      params.delete('vendor_id');
+      params.delete('cat');
+      params.delete('opt');
+      const q = params.toString();
+      router.replace(q ? `/opportunities?${q}` : '/opportunities');
+    }
+    onClose();
+  };
+
+  const handleBackToVendorServices = () => {
+    const params = new URLSearchParams(searchParams ? searchParams.toString() : '');
+    if (params.has('opt') || params.has('cat')) {
+      router.back();
+    } else {
+      handleCloseModal();
+    }
+  };
 
   const handleQtyChange = (delta: number) => {
     setQuantity((prev) => Math.max(1, prev + delta));
@@ -409,14 +479,38 @@ export default function VendorStorefrontModal({
   const handleAddToCart = (opt: GroupedOption) => {
     if (!vendor) return;
 
+    // Rule: Enforce vendor offering MOQ
+    const itemMoq = opt.entityType === 'ITEM' && opt.rawItem ? (opt.rawItem.min_order_quantity || 1) : 1;
+    if (quantity < itemMoq) {
+      setMoqWarning({
+        itemTitle: opt.rawItem?.title || opt.title,
+        moq: itemMoq,
+        requestedQty: quantity,
+        categorySlug: opt.rawItem?.category?.slug || selectedGroup?.key?.replace('cat_', ''),
+      });
+      return;
+    }
+    setMoqWarning(null);
+
     const selectedAddons = getSelectedAddonsList(opt);
     const addonsUnitPrice = selectedAddons.reduce((sum, a) => sum + a.price, 0);
     const effectiveUnitPrice = opt.price + addonsUnitPrice;
     const subtotal = effectiveUnitPrice * quantity;
 
+    const itemImage = opt.rawItem?.images
+      ? (typeof opt.rawItem.images === 'string'
+          ? opt.rawItem.images
+          : Array.isArray(opt.rawItem.images)
+          ? (opt.rawItem.images as any[])[0]
+          : undefined)
+      : vendor.avatar_url;
+
     addToCart({
       vendorId: vendor.id,
       vendorName: vendor.full_name,
+      vendorBrandName: vendor.full_name,
+      vendorAvatar: vendor.avatar_url,
+      vendorPhone: vendor.phone,
       catalogItemId: opt.entityType === 'ITEM' ? opt.parentEntityId : undefined,
       vendorAssetId: opt.entityType === 'ASSET' ? opt.parentEntityId : undefined,
       optionId: opt.id,
@@ -427,8 +521,9 @@ export default function VendorStorefrontModal({
       categoryId: opt.rawItem?.category_id || opt.rawAsset?.category_id || undefined,
       categoryName: selectedGroup?.name || 'Service',
       categorySlug: opt.rawItem?.category?.slug || opt.rawAsset?.category?.slug || 'service',
+      imageUrl: itemImage,
       title: opt.rawItem?.title ? `${opt.rawItem.title} (${opt.title})` : `${selectedGroup?.name || 'Service'} — ${opt.title}`,
-      description: opt.description,
+      description: opt.description || opt.rawItem?.description || opt.rawAsset?.description,
       quantity: quantity,
       quantityUnit: opt.unit ? opt.unit.replace('PER_', '').toLowerCase() : 'unit',
       unitPrice: effectiveUnitPrice,
@@ -447,11 +542,23 @@ export default function VendorStorefrontModal({
 
     setAddedNotice(`Added ${quantity} ${opt.title} to cart!`);
     setTimeout(() => setAddedNotice(null), 2500);
-    onClose();
   };
 
   const handleOrderDirect = (opt: GroupedOption) => {
     if (!vendor) return;
+
+    // Rule: Enforce vendor offering MOQ
+    const itemMoq = opt.entityType === 'ITEM' && opt.rawItem ? (opt.rawItem.min_order_quantity || 1) : 1;
+    if (quantity < itemMoq) {
+      setMoqWarning({
+        itemTitle: opt.rawItem?.title || opt.title,
+        moq: itemMoq,
+        requestedQty: quantity,
+        categorySlug: opt.rawItem?.category?.slug || selectedGroup?.key?.replace('cat_', ''),
+      });
+      return;
+    }
+    setMoqWarning(null);
 
     const selectedAddons = getSelectedAddonsList(opt);
     const addonsUnitPrice = selectedAddons.reduce((sum, a) => sum + a.price, 0);
@@ -466,9 +573,7 @@ export default function VendorStorefrontModal({
       description: opt.description,
     };
 
-    // Add to cart and open checkout directly
-    handleAddToCart(opt);
-
+    // Open checkout directly for this item (do not open Cart Drawer)
     if (opt.entityType === 'ITEM' && opt.rawItem && onSelectCatalogItemForOrder) {
       onSelectCatalogItemForOrder(vendor, opt.rawItem, quantity, vendorSellingOpt);
     } else if (opt.entityType === 'ASSET' && opt.rawAsset && onSelectServiceForOrder) {
@@ -477,41 +582,38 @@ export default function VendorStorefrontModal({
   };
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-slate-950/80 backdrop-blur-md overflow-hidden animate-in fade-in duration-200">
-      <div className="relative w-full max-w-4xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-[#0d1322] border border-slate-800 rounded-3xl shadow-2xl overflow-hidden flex flex-col">
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60 backdrop-blur-sm overflow-hidden animate-in fade-in duration-200">
+      <div className="relative w-full max-w-4xl max-h-[calc(100dvh-2rem)] sm:max-h-[calc(100dvh-3rem)] my-auto bg-white border border-slate-200 rounded-3xl shadow-2xl overflow-hidden flex flex-col text-slate-900">
         
         {/* Modal Header Bar */}
-        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-800 bg-slate-900/60 shrink-0">
-          <div className="flex items-center gap-2 text-xs font-semibold text-slate-400 overflow-hidden">
-            <Store className="w-4 h-4 text-emerald-400 shrink-0" />
+        <div className="flex items-center justify-between px-6 py-4 border-b border-slate-200 bg-slate-50 shrink-0">
+          <div className="flex items-center gap-2 text-xs font-semibold text-slate-600 overflow-hidden">
+            <Store className="w-4 h-4 text-black shrink-0" />
             <button
               type="button"
               onClick={onClose}
-              className="hover:text-white transition-colors"
+              className="hover:text-black transition-colors"
             >
               Browse Shops
             </button>
-            <ChevronRight className="w-3.5 h-3.5 text-slate-600 shrink-0" />
+            <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
             <button
               type="button"
-              onClick={() => {
-                setSelectedCategoryKey(null);
-                setSelectedOptionId(null);
-              }}
-              className={`hover:text-white transition-colors truncate max-w-[180px] sm:max-w-xs ${!selectedGroup ? 'text-white font-bold' : ''}`}
+              onClick={handleBackToVendorServices}
+              className={`hover:text-black transition-colors truncate max-w-[180px] sm:max-w-xs ${!selectedGroup ? 'text-slate-900 font-bold' : ''}`}
             >
               {vendor?.full_name || 'Vendor Storefront'}
             </button>
             {selectedGroup && (
               <>
-                <ChevronRight className="w-3.5 h-3.5 text-slate-600 shrink-0" />
-                <span className="text-emerald-400 font-bold truncate max-w-[180px] sm:max-w-xs">{selectedGroup.name}</span>
+                <ChevronRight className="w-3.5 h-3.5 text-slate-400 shrink-0" />
+                <span className="text-black font-bold truncate max-w-[180px] sm:max-w-xs">{selectedGroup.name}</span>
               </>
             )}
           </div>
           <button
-            onClick={onClose}
-            className="p-2 text-slate-400 hover:text-white rounded-xl hover:bg-slate-800/80 transition-colors"
+            onClick={handleCloseModal}
+            className="p-2 text-slate-500 hover:text-black rounded-xl hover:bg-slate-200 transition-colors"
             title="Close Storefront"
           >
             <X className="w-5 h-5" />
@@ -519,53 +621,94 @@ export default function VendorStorefrontModal({
         </div>
 
         {addedNotice && (
-          <div className="px-6 py-2.5 bg-emerald-500/20 border-b border-emerald-500/30 text-emerald-300 text-xs font-bold flex items-center gap-2 justify-center animate-in slide-in-from-top-2">
-            <Check className="w-4 h-4 text-emerald-400" />
+          <div className="px-6 py-2.5 bg-slate-100 border-b border-slate-300 text-slate-900 text-xs font-bold flex items-center gap-2 justify-center animate-in slide-in-from-top-2">
+            <Check className="w-4 h-4 text-black" />
             <span>{addedNotice}</span>
+          </div>
+        )}
+
+        {moqWarning && (
+          <div className="mx-6 my-3 p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-950 space-y-3 shadow-sm animate-in fade-in duration-150 shrink-0">
+            <div className="flex items-center gap-2 font-black text-xs uppercase tracking-wider text-amber-900">
+              <AlertCircle className="w-4.5 h-4.5 text-amber-600 shrink-0" />
+              <span>Quantity Below Vendor Minimum Order Quantity (MOQ)</span>
+            </div>
+            <p className="text-xs text-amber-900 leading-relaxed">
+              Vendor <strong>{vendor?.full_name}</strong> requires a minimum order quantity of <strong>{moqWarning.moq.toLocaleString()} pieces</strong> for <strong>{moqWarning.itemTitle}</strong>. You requested <strong>{moqWarning.requestedQty.toLocaleString()} pieces</strong>.
+            </p>
+            <div className="flex flex-wrap items-center gap-2.5 pt-1">
+              <button
+                type="button"
+                onClick={() => {
+                  const catSlug = moqWarning.categorySlug || 'bricks-building-materials';
+                  const reqQty = moqWarning.requestedQty;
+                  const itemTitle = moqWarning.itemTitle;
+                  setMoqWarning(null);
+                  onClose();
+                  if (onSwitchToRequestWhatYouNeed) {
+                    onSwitchToRequestWhatYouNeed(catSlug, reqQty, itemTitle);
+                  }
+                }}
+                className="px-4 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white text-xs font-black transition-all shadow-sm flex items-center gap-1.5"
+              >
+                <Sparkles className="w-4 h-4" />
+                <span>Switch to &quot;Request What You Need&quot;</span>
+              </button>
+              <button
+                type="button"
+                onClick={() => {
+                  setQuantity(moqWarning.moq);
+                  setMoqWarning(null);
+                }}
+                className="px-3.5 py-2.5 rounded-xl bg-white border border-amber-400 hover:bg-amber-100 text-amber-950 text-xs font-bold transition-all"
+              >
+                Set Quantity to MOQ ({moqWarning.moq.toLocaleString()})
+              </button>
+            </div>
           </div>
         )}
 
         {loading ? (
           <div className="flex flex-col items-center justify-center py-20 gap-3">
-            <Loader2 className="w-8 h-8 text-emerald-400 animate-spin" />
-            <p className="text-sm text-slate-400">Loading Vendor Storefront...</p>
+            <Loader2 className="w-8 h-8 text-black animate-spin" />
+            <p className="text-sm text-slate-600">Loading Vendor Storefront...</p>
           </div>
         ) : (
           <div className="flex-1 overflow-y-auto p-6 space-y-6">
             
             {/* Vendor Header Summary Card */}
             {vendor && (
-              <div className="p-6 rounded-2xl bg-gradient-to-r from-slate-900 via-slate-900/90 to-emerald-950/30 border border-slate-800/80 shadow-lg space-y-4">
+              <div className="p-6 rounded-2xl bg-white border border-slate-200 shadow-sm space-y-4">
                 <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
                   <div className="flex items-start gap-4">
-                    <div className="w-16 h-16 rounded-2xl bg-slate-800 border border-slate-700 overflow-hidden flex items-center justify-center shrink-0">
+                    <div className="w-16 h-16 rounded-2xl bg-slate-100 border border-slate-300 overflow-hidden flex items-center justify-center shrink-0">
                       {vendor.avatar_url ? (
                         <img src={vendor.avatar_url} alt={vendor.full_name} className="w-full h-full object-cover" />
                       ) : (
-                        <Store className="w-8 h-8 text-emerald-400" />
+                        <Store className="w-8 h-8 text-black" />
                       )}
                     </div>
                     <div>
                       <div className="flex items-center gap-2 flex-wrap">
-                        <h2 className="text-2xl font-extrabold text-white">{vendor.full_name}</h2>
+                        <h2 className="text-2xl font-black text-slate-900">{vendor.full_name}</h2>
                         {vendor.is_verified && (
-                          <span className="px-2.5 py-0.5 rounded-full bg-emerald-500/10 border border-emerald-500/30 text-emerald-400 text-xs font-bold flex items-center gap-1">
-                            <ShieldCheck className="w-3.5 h-3.5" />
+                          <span className="px-2.5 py-0.5 rounded-full bg-slate-100 border border-slate-300 text-slate-900 text-xs font-bold flex items-center gap-1">
+                            <ShieldCheck className="w-3.5 h-3.5 text-black" />
                             Verified Vendor
                           </span>
                         )}
                       </div>
-                      <p className="text-xs text-slate-400 mt-1 flex items-center gap-1.5">
-                        <MapPin className="w-3.5 h-3.5 text-blue-400 shrink-0" />
+                      <p className="text-xs text-slate-600 mt-1 flex items-center gap-1.5">
+                        <MapPin className="w-3.5 h-3.5 text-black shrink-0" />
                         <span>{vendor.address_text || 'Choutuppal, Telangana'}</span>
                       </p>
                     </div>
                   </div>
 
-                  <div className="flex items-center gap-4 bg-slate-950/60 px-4 py-2.5 rounded-xl border border-slate-800 self-start sm:self-auto">
-                    <div className="text-center px-3 border-r border-slate-800">
-                      <div className="flex items-center gap-1 text-amber-400 font-bold text-sm">
-                        <Star className="w-4 h-4 fill-amber-400" />
+                  <div className="flex items-center gap-4 bg-slate-50 px-4 py-2.5 rounded-xl border border-slate-200 self-start sm:self-auto">
+                    <div className="text-center px-3 border-r border-slate-200">
+                      <div className="flex items-center gap-1 text-slate-900 font-bold text-sm">
+                        <Star className="w-4 h-4 fill-current text-black" />
                         <span>{vendor.trust_score ? vendor.trust_score.toFixed(1) : '5.0'}</span>
                       </div>
                       <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">
@@ -573,7 +716,7 @@ export default function VendorStorefrontModal({
                       </span>
                     </div>
                     <div className="text-center px-3">
-                      <div className="text-sm font-bold text-emerald-400">{categoryGroups.length}</div>
+                      <div className="text-sm font-bold text-black">{categoryGroups.length}</div>
                       <span className="text-[10px] text-slate-500 uppercase tracking-wider font-semibold">
                         Services Offered
                       </span>
@@ -586,33 +729,33 @@ export default function VendorStorefrontModal({
             {/* VIEW 1: CATEGORY / MAIN SERVICE LIST */}
             {selectedCategoryKey === null ? (
               <div className="space-y-4">
-                <div className="border-b border-slate-800 pb-3">
-                  <h3 className="text-lg font-bold text-white uppercase tracking-wider">Services &amp; Products</h3>
-                  <p className="text-xs text-slate-400 mt-0.5">
+                <div className="border-b border-slate-200 pb-3">
+                  <h3 className="text-lg font-black text-slate-900 uppercase tracking-wider">Services &amp; Products</h3>
+                  <p className="text-xs text-slate-600 mt-0.5">
                     Select a service category offered by {vendor?.full_name || 'this vendor'} to choose packages, variants &amp; add-ons.
                   </p>
                 </div>
 
                 {categoryGroups.length === 0 ? (
-                  <div className="text-center py-12 px-4 rounded-2xl bg-slate-900/40 border border-slate-800/60 space-y-2">
-                    <ShoppingBag className="w-8 h-8 text-slate-600 mx-auto" />
-                    <p className="text-xs font-medium text-slate-400">No active services registered for this vendor.</p>
+                  <div className="text-center py-12 px-4 rounded-2xl bg-slate-50 border border-slate-200 space-y-2">
+                    <ShoppingBag className="w-8 h-8 text-slate-400 mx-auto" />
+                    <p className="text-xs font-medium text-slate-600">No active services registered for this vendor.</p>
                   </div>
                 ) : (
                   <div className="space-y-3">
                     {categoryGroups.map((group) => (
                       <div
                         key={group.key}
-                        className="p-5 rounded-2xl bg-slate-900/80 border border-slate-800 flex items-center justify-between gap-4 hover:border-slate-700 transition-all group"
+                        className="p-5 rounded-2xl bg-slate-50 border border-slate-200 flex items-center justify-between gap-4 hover:border-slate-300 hover:bg-slate-100 transition-all group"
                       >
                         <div className="flex items-center gap-4">
                           <div className="text-3xl shrink-0">{group.emoji}</div>
                           <div>
-                            <h4 className="text-lg font-extrabold text-white group-hover:text-blue-300 transition-colors">
+                            <h4 className="text-lg font-bold text-slate-900 group-hover:text-black transition-colors">
                               {group.name}
                             </h4>
-                            <p className="text-xs text-slate-400 mt-0.5 line-clamp-1">{group.description}</p>
-                            <span className="inline-block mt-1 text-[10px] font-mono text-emerald-400 font-bold">
+                            <p className="text-xs text-slate-600 mt-0.5 line-clamp-1">{group.description}</p>
+                            <span className="inline-block mt-1 text-[10px] font-mono text-black font-bold">
                               {group.options.length} Option{group.options.length > 1 ? 's' : ''} / Packages Available
                             </span>
                           </div>
@@ -620,11 +763,10 @@ export default function VendorStorefrontModal({
 
                         <button
                           onClick={() => {
-                            setSelectedCategoryKey(group.key);
-                            setSelectedOptionId(group.options.length > 0 ? group.options[0].id : null);
-                            setQuantity(1);
+                            const firstOpt = group.options.length > 0 ? group.options[0].id : null;
+                            handleSelectCategoryGroup(group.key, firstOpt);
                           }}
-                          className="px-5 py-2.5 rounded-xl bg-blue-600 hover:bg-blue-500 text-white font-extrabold text-xs shrink-0 flex items-center gap-2 shadow-md shadow-blue-600/30 transition-all"
+                          className="px-5 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white font-black text-xs shrink-0 flex items-center gap-2 shadow-sm transition-all"
                         >
                           <span>VIEW OPTIONS</span>
                           <ChevronRight className="w-4 h-4" />
@@ -638,28 +780,25 @@ export default function VendorStorefrontModal({
               /* VIEW 2: EXPANDED DYNAMIC VARIANTS & ADD-ONS FOR SELECTED SERVICE */
               selectedGroup && (
                 <div className="space-y-6 animate-in fade-in duration-200">
-                  <div className="flex items-center justify-between border-b border-slate-800 pb-4">
+                  <div className="flex items-center justify-between border-b border-slate-200 pb-4">
                     <div>
                       <button
-                        onClick={() => {
-                          setSelectedCategoryKey(null);
-                          setSelectedOptionId(null);
-                        }}
-                        className="inline-flex items-center gap-2 text-xs font-bold text-slate-400 hover:text-white transition-colors mb-2"
+                        onClick={handleBackToVendorServices}
+                        className="inline-flex items-center gap-2 text-xs font-bold text-slate-600 hover:text-black transition-colors mb-2"
                       >
-                        <ArrowLeft className="w-4 h-4 text-blue-400" />
+                        <ArrowLeft className="w-4 h-4 text-black" />
                         <span>Back to Services</span>
                       </button>
-                      <h3 className="text-2xl font-extrabold text-white flex items-center gap-2">
+                      <h3 className="text-2xl font-black text-slate-900 flex items-center gap-2">
                         <span>{selectedGroup.emoji}</span>
                         <span>{selectedGroup.name}</span>
                       </h3>
-                      <p className="text-xs text-slate-400 mt-1">{selectedGroup.description}</p>
+                      <p className="text-xs text-slate-600 mt-1">{selectedGroup.description}</p>
                     </div>
                   </div>
 
                   <div className="space-y-3">
-                    <span className="text-xs font-extrabold uppercase tracking-wider text-slate-300 block">
+                    <span className="text-xs font-black uppercase tracking-wider text-slate-900 block">
                       Choose Service Option / Package:
                     </span>
 
@@ -677,75 +816,77 @@ export default function VendorStorefrontModal({
                           <div
                             key={opt.id}
                             onClick={() => {
-                              setSelectedOptionId(opt.id);
+                              handleSelectOptionCard(opt.id);
                             }}
                             className={`p-5 rounded-2xl border text-left cursor-pointer transition-all flex flex-col justify-between space-y-4 ${
                               isSelected
-                                ? 'bg-gradient-to-br from-emerald-950/80 via-slate-900 to-slate-900 border-emerald-500 text-white shadow-xl ring-2 ring-emerald-500/50'
-                                : 'bg-slate-900/70 border-slate-800 text-slate-400 hover:border-slate-700 hover:text-slate-200'
+                                ? 'bg-black text-white border-black shadow-md'
+                                : 'bg-slate-50 border-slate-200 text-slate-900 hover:border-slate-300 hover:bg-slate-100'
                             }`}
                           >
                             <div className="space-y-2">
                               <div className="flex items-start justify-between gap-2">
-                                <h4 className="font-extrabold text-base text-white">{opt.title}</h4>
-                                {isSelected && <Check className="w-5 h-5 text-emerald-400 shrink-0" />}
+                                <h4 className={`font-bold text-base ${isSelected ? 'text-white' : 'text-slate-900'}`}>{opt.title}</h4>
+                                {isSelected && <Check className="w-5 h-5 text-white shrink-0" />}
                               </div>
 
-                              <div className="text-xl font-extrabold text-emerald-400 font-mono">
-                                ₹{effectiveUnitPrice.toLocaleString()} <span className="text-xs text-slate-400 font-normal">/ {formattedUnit}</span>
+                              <div className={`text-xl font-black font-mono ${isSelected ? 'text-white' : 'text-slate-900'}`}>
+                                ₹{effectiveUnitPrice.toLocaleString()} <span className={`text-xs font-normal ${isSelected ? 'text-slate-300' : 'text-slate-500'}`}>/ {formattedUnit}</span>
                                 {addonsSum > 0 && (
-                                  <span className="text-[10px] text-purple-300 font-normal block">
+                                  <span className={`text-[10px] font-normal block ${isSelected ? 'text-slate-300' : 'text-slate-600'}`}>
                                     (Base ₹{opt.price} + ₹{addonsSum} Add-ons)
                                   </span>
                                 )}
                               </div>
 
                               {opt.description && (
-                                <p className="text-xs text-slate-400 leading-relaxed">{opt.description}</p>
+                                <p className={`text-xs leading-relaxed ${isSelected ? 'text-slate-300' : 'text-slate-600'}`}>{opt.description}</p>
                               )}
 
                               {/* Included Services Badges */}
                               {opt.included_services && opt.included_services.length > 0 ? (
-                                <div className="flex items-center gap-1.5 flex-wrap pt-2 border-t border-slate-800/60">
+                                <div className={`flex items-center gap-1.5 flex-wrap pt-2 border-t ${isSelected ? 'border-slate-800' : 'border-slate-200'}`}>
                                   {opt.included_services.map((inc) => (
                                     <span
                                       key={inc}
-                                      className="px-2.5 py-0.5 rounded bg-emerald-500/20 text-emerald-300 text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 border border-emerald-500/30"
+                                      className={`px-2.5 py-0.5 rounded text-[10px] font-bold uppercase tracking-wider flex items-center gap-1 border ${
+                                        isSelected ? 'bg-slate-800 border-slate-700 text-white' : 'bg-slate-200 border-slate-300 text-slate-900'
+                                      }`}
                                     >
-                                      {inc.toUpperCase().includes('TRANS') && <Truck className="w-3 h-3 text-emerald-400" />}
-                                      {inc.toUpperCase().includes('DRIVER') && <UserCheck className="w-3 h-3 text-emerald-400" />}
+                                      {inc.toUpperCase().includes('TRANS') && <Truck className="w-3 h-3 text-current" />}
+                                      {inc.toUpperCase().includes('DRIVER') && <UserCheck className="w-3 h-3 text-current" />}
                                       <span>{inc} INCLUDED</span>
                                     </span>
                                   ))}
                                 </div>
                               ) : (
-                                <span className="text-[10px] text-slate-500 font-medium pt-2 border-t border-slate-800/60 block">
+                                <span className={`text-[10px] font-medium pt-2 border-t block ${isSelected ? 'border-slate-800 text-slate-400' : 'border-slate-200 text-slate-500'}`}>
                                   Material only
                                 </span>
                               )}
 
                               {/* Optional Add-ons Checkboxes */}
                               {isSelected && opt.availableAddons && opt.availableAddons.length > 0 && (
-                                <div className="pt-3 border-t border-slate-800/80 space-y-2" onClick={(e) => e.stopPropagation()}>
-                                  <span className="text-xs font-bold text-purple-300 block">Optional Add-ons:</span>
+                                <div className="pt-3 border-t border-slate-800 space-y-2" onClick={(e) => e.stopPropagation()}>
+                                  <span className="text-xs font-bold text-slate-300 block">Optional Add-ons:</span>
                                   <div className="space-y-1.5">
                                     {opt.availableAddons.map((addon) => {
                                       const isAddonChecked = (selectedAddonsMap[opt.id] || []).includes(addon.id);
                                       return (
                                         <label
                                           key={addon.id}
-                                          className="flex items-center justify-between p-2 rounded-xl bg-slate-950 border border-slate-800 hover:border-slate-700 cursor-pointer text-xs transition-all"
+                                          className="flex items-center justify-between p-2 rounded-xl bg-slate-900 border border-slate-800 hover:border-slate-700 cursor-pointer text-xs transition-all"
                                         >
                                           <div className="flex items-center gap-2">
                                             <input
                                               type="checkbox"
                                               checked={isAddonChecked}
                                               onChange={() => toggleAddonForOption(opt.id, addon.id)}
-                                              className="rounded bg-slate-900 border-slate-700 text-purple-500 focus:ring-0"
+                                              className="rounded bg-slate-800 border-slate-700 text-white focus:ring-0"
                                             />
                                             <span className="text-slate-200 font-medium">{addon.title}</span>
                                           </div>
-                                          <span className="font-mono text-purple-400 font-bold">+₹{addon.price}</span>
+                                          <span className="font-mono text-white font-bold">+₹{addon.price}</span>
                                         </label>
                                       );
                                     })}
@@ -756,9 +897,9 @@ export default function VendorStorefrontModal({
 
                             {/* Option Selection & Quantity / Add to Cart Controls */}
                             {isSelected ? (
-                              <div className="pt-3 border-t border-slate-800/80 space-y-4">
-                                <div className="flex items-center justify-between gap-3 bg-slate-950 p-2.5 rounded-xl border border-slate-800">
-                                  <span className="text-xs text-slate-400 font-semibold">Quantity / Units:</span>
+                              <div className="pt-3 border-t border-slate-800 space-y-4">
+                                <div className="flex items-center justify-between gap-3 bg-slate-900 p-2.5 rounded-xl border border-slate-800">
+                                  <span className="text-xs text-slate-300 font-semibold">Quantity / Units:</span>
                                   <div className="flex items-center gap-1">
                                     <button
                                       type="button"
@@ -791,8 +932,8 @@ export default function VendorStorefrontModal({
                                 </div>
 
                                 <div className="flex items-center justify-between text-xs">
-                                  <span className="text-slate-400 font-semibold">Total Subtotal:</span>
-                                  <span className="text-sm font-extrabold text-emerald-400 font-mono">
+                                  <span className="text-slate-300 font-semibold">Total Subtotal:</span>
+                                  <span className="text-sm font-black text-white font-mono">
                                     ₹{subtotal.toLocaleString()}
                                   </span>
                                 </div>
@@ -806,7 +947,7 @@ export default function VendorStorefrontModal({
                                     }}
                                     className="flex-1 py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-white font-bold text-xs border border-slate-700 flex items-center justify-center gap-1.5 transition-all"
                                   >
-                                    <ShoppingCart className="w-3.5 h-3.5 text-emerald-400" />
+                                    <ShoppingCart className="w-3.5 h-3.5 text-white" />
                                     <span>Add to Cart</span>
                                   </button>
 
@@ -816,7 +957,7 @@ export default function VendorStorefrontModal({
                                       e.stopPropagation();
                                       handleOrderDirect(opt);
                                     }}
-                                    className="flex-1 py-2.5 rounded-xl bg-gradient-to-r from-emerald-600 to-teal-600 hover:from-emerald-500 hover:to-teal-500 text-white font-bold text-xs shadow-lg shadow-emerald-600/20 flex items-center justify-center gap-1.5 transition-all"
+                                    className="flex-1 py-2.5 rounded-xl bg-white hover:bg-slate-100 text-black font-bold text-xs flex items-center justify-center gap-1.5 transition-all shadow-sm"
                                   >
                                     <span>Order Direct</span>
                                     <ArrowRight className="w-3.5 h-3.5" />
@@ -830,7 +971,7 @@ export default function VendorStorefrontModal({
                                   e.stopPropagation();
                                   setSelectedOptionId(opt.id);
                                 }}
-                                className="w-full py-2.5 rounded-xl bg-slate-800 hover:bg-slate-700 text-slate-300 font-bold text-xs transition-all flex items-center justify-center gap-1"
+                                className="w-full py-2.5 rounded-xl bg-slate-100 hover:bg-slate-200 text-slate-900 font-bold text-xs transition-all flex items-center justify-center gap-1"
                               >
                                 <span>SELECT OPTION</span>
                               </button>

@@ -21,7 +21,24 @@ func NewLogisticsHandler(logisticsService *service.LogisticsService) *LogisticsH
 	}
 }
 
-// 1. Voice NLU Entity Parser Handler
+// 1. Calculate Delivery & Itemized Invoice Breakdown (POST /api/v1/logistics/calculate-delivery)
+func (h *LogisticsHandler) CalculateDelivery(w http.ResponseWriter, r *http.Request) {
+	var req domain.DeliveryCalculationRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	res, err := h.logisticsService.CalculateDeliveryFee(r.Context(), &req)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to calculate delivery invoice", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Delivery invoice calculated successfully", res)
+}
+
+// 2. Voice NLU Entity Parser Handler
 func (h *LogisticsHandler) ParseVoice(w http.ResponseWriter, r *http.Request) {
 	var req domain.VoiceParseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
@@ -38,13 +55,14 @@ func (h *LogisticsHandler) ParseVoice(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, "Voice order parsed successfully", res)
 }
 
-// 2. Cascade Spawning Handler
+// 3. Cascade Spawning Handler
 type CascadePayload struct {
 	RootOpportunityID string  `json:"root_opportunity_id"`
-	CascadeType       string  `json:"cascade_type"` // TRANSPORT, DRIVER, PARTS
+	CascadeType       string  `json:"cascade_type"` // TRANSPORT, UNLOADING, DRIVER, PARTS
 	ParentUserID      string  `json:"parent_user_id"`
 	Lat               float64 `json:"lat"`
 	Lng               float64 `json:"lng"`
+	Budget            float64 `json:"budget"`
 	PartNumber        string  `json:"part_number"`
 }
 
@@ -70,6 +88,8 @@ func (h *LogisticsHandler) TriggerCascade(w http.ResponseWriter, r *http.Request
 	switch p.CascadeType {
 	case "TRANSPORT":
 		created, err = h.logisticsService.SpawnTransportCascade(r.Context(), rootID, userID, p.Lat, p.Lng)
+	case "UNLOADING":
+		created, err = h.logisticsService.SpawnUnloadingCascade(r.Context(), rootID, userID, p.Lat, p.Lng)
 	case "DRIVER":
 		created, err = h.logisticsService.SpawnDriverCascade(r.Context(), rootID, userID)
 	case "PARTS":
@@ -87,7 +107,7 @@ func (h *LogisticsHandler) TriggerCascade(w http.ResponseWriter, r *http.Request
 	response.JSON(w, http.StatusCreated, "Cascade opportunity spawned successfully", created)
 }
 
-// 3. SOS Incident Handler
+// 4. SOS Incident Handler
 type SOSPayload struct {
 	OpportunityID string  `json:"opportunity_id"`
 	ReporterID    string  `json:"reporter_id"`
@@ -120,23 +140,23 @@ func (h *LogisticsHandler) ReportSOSIncident(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	response.JSON(w, http.StatusOK, "SOS Breakdown Incident registered. Emergency mechanic child opportunity spawned.", map[string]interface{}{
-		"incident":              inc,
-		"roadside_repair_child": repairChild,
+	response.JSON(w, http.StatusCreated, "SOS breakdown incident registered & repair cascade triggered", map[string]interface{}{
+		"incident":     inc,
+		"repair_child": repairChild,
 	})
 }
 
-// 4. Way Manifest Handlers
-type ManifestPayload struct {
+// 5. Way Manifest Handlers
+type WayManifestPayload struct {
 	OpportunityID string  `json:"opportunity_id"`
 	VehicleID     *string `json:"vehicle_id"`
 	DriverID      *string `json:"driver_id"`
 }
 
 func (h *LogisticsHandler) GenerateWayManifest(w http.ResponseWriter, r *http.Request) {
-	var p ManifestPayload
+	var p WayManifestPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		response.Error(w, http.StatusBadRequest, "Invalid manifest payload", err.Error())
+		response.Error(w, http.StatusBadRequest, "Invalid way manifest payload", err.Error())
 		return
 	}
 
@@ -147,35 +167,35 @@ func (h *LogisticsHandler) GenerateWayManifest(w http.ResponseWriter, r *http.Re
 	}
 
 	var vID, dID *uuid.UUID
-	if p.VehicleID != nil {
-		if parsed, err := uuid.Parse(*p.VehicleID); err == nil {
-			vID = &parsed
+	if p.VehicleID != nil && *p.VehicleID != "" {
+		if id, err := uuid.Parse(*p.VehicleID); err == nil {
+			vID = &id
 		}
 	}
-	if p.DriverID != nil {
-		if parsed, err := uuid.Parse(*p.DriverID); err == nil {
-			dID = &parsed
+	if p.DriverID != nil && *p.DriverID != "" {
+		if id, err := uuid.Parse(*p.DriverID); err == nil {
+			dID = &id
 		}
 	}
 
 	manifest, err := h.logisticsService.GenerateWayManifest(r.Context(), oppID, vID, dID)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to generate manifest", err.Error())
+		response.Error(w, http.StatusInternalServerError, "Failed to generate way manifest", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, "Manifest generated successfully", manifest)
+	response.JSON(w, http.StatusCreated, "Digital way manifest generated successfully", manifest)
 }
 
-type POLPayload struct {
+type POLUploadPayload struct {
 	OpportunityID string `json:"opportunity_id"`
-	PhotoURL      string `json:"photo_url"`
+	POLPhotoURL   string `json:"pol_photo_url"`
 }
 
 func (h *LogisticsHandler) UploadPOL(w http.ResponseWriter, r *http.Request) {
-	var p POLPayload
+	var p POLUploadPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		response.Error(w, http.StatusBadRequest, "Invalid POL payload", err.Error())
+		response.Error(w, http.StatusBadRequest, "Invalid POL upload payload", err.Error())
 		return
 	}
 
@@ -185,25 +205,25 @@ func (h *LogisticsHandler) UploadPOL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manifest, err := h.logisticsService.UpdatePOL(r.Context(), oppID, p.PhotoURL)
+	manifest, err := h.logisticsService.UpdatePOL(r.Context(), oppID, p.POLPhotoURL)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to update POL", err.Error())
+		response.Error(w, http.StatusInternalServerError, "Failed to upload Proof of Loading", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusOK, "Proof of Loading (PoL) verified", manifest)
+	response.JSON(w, http.StatusOK, "Proof of Loading (PoL) registered successfully. Status: IN_TRANSIT", manifest)
 }
 
-type PODPayload struct {
+type PODUploadPayload struct {
 	OpportunityID string `json:"opportunity_id"`
-	QRCode        string `json:"qr_code"`
-	SignatureURL  string `json:"signature_url"`
+	PODQRCode     string `json:"pod_qr_code"`
+	PODSignature  string `json:"pod_signature_url"`
 }
 
 func (h *LogisticsHandler) UploadPOD(w http.ResponseWriter, r *http.Request) {
-	var p PODPayload
+	var p PODUploadPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
-		response.Error(w, http.StatusBadRequest, "Invalid POD payload", err.Error())
+		response.Error(w, http.StatusBadRequest, "Invalid POD upload payload", err.Error())
 		return
 	}
 
@@ -213,32 +233,56 @@ func (h *LogisticsHandler) UploadPOD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	manifest, err := h.logisticsService.UpdatePOD(r.Context(), oppID, p.QRCode, p.SignatureURL)
+	manifest, err := h.logisticsService.UpdatePOD(r.Context(), oppID, p.PODQRCode, p.PODSignature)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to update POD", err.Error())
+		response.Error(w, http.StatusInternalServerError, "Failed to upload Proof of Delivery", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusOK, "Proof of Delivery (PoD) verified. Opportunity completed.", manifest)
+	response.JSON(w, http.StatusOK, "Proof of Delivery (PoD) registered successfully. Status: DELIVERED", manifest)
 }
 
-// 5. Parts Inventory Search
+// VerifyDeliveryOTP handles POST /api/v1/opportunities/{id}/verify-delivery-otp
+func (h *LogisticsHandler) VerifyDeliveryOTP(w http.ResponseWriter, r *http.Request) {
+	oppIDStr := chi.URLParam(r, "id")
+	oppID, err := uuid.Parse(oppIDStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid opportunity ID format", nil)
+		return
+	}
+
+	var payload struct {
+		OTPCode string `json:"otp_code"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	if err := h.logisticsService.VerifyDeliveryOTP(r.Context(), oppID, payload.OTPCode); err != nil {
+		response.Error(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Digital Handshake complete! Delivery verified via 4-digit OTP & Escrow payouts released.", nil)
+}
+
+// 6. Spare Parts Procurement Search & Checkout
 func (h *LogisticsHandler) SearchParts(w http.ResponseWriter, r *http.Request) {
 	query := r.URL.Query().Get("q")
 	if query == "" {
 		query = "TC-990"
 	}
 
-	items, err := h.logisticsService.SearchParts(r.Context(), query)
+	parts, err := h.logisticsService.SearchParts(r.Context(), query)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to search parts", err.Error())
+		response.Error(w, http.StatusInternalServerError, "Failed to search parts inventory", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusOK, "Parts inventory search results", items)
+	response.JSON(w, http.StatusOK, "Parts inventory search retrieved", parts)
 }
 
-// 6. Parts Checkout Handler
 type CheckoutPartPayload struct {
 	PartID  string `json:"part_id"`
 	BuyerID string `json:"buyer_id"`

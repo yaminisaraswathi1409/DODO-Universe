@@ -195,11 +195,12 @@ func (r *UserRepository) UpdateStatus(ctx context.Context, userID uuid.UUID, sta
 	return r.scanUserRow(row)
 }
 
-// NormalizePhone converts any phone string (+91..., 9876..., +91 98765-43210) to standard E.164 (+919876543210)
-func NormalizePhone(phone string) string {
+// ValidateAndNormalizePhone validates that the phone number contains the correct number of digits
+// and normalizes it to standard E.164. For Indian mobile numbers (+91 or default), it strictly enforces exactly 10 digits.
+func ValidateAndNormalizePhone(phone string) (string, error) {
 	phone = strings.TrimSpace(phone)
 	if phone == "" {
-		return ""
+		return "", errors.New("mobile phone number is required")
 	}
 
 	var digits strings.Builder
@@ -211,19 +212,60 @@ func NormalizePhone(phone string) string {
 
 	dStr := digits.String()
 	if dStr == "" {
-		return phone
+		return "", errors.New("phone number must contain numeric digits")
 	}
 
-	// 10 digits without country code -> default to +91
+	// Case 1: Prefixed with +91 or 91
+	if strings.HasPrefix(phone, "+91") || (len(dStr) >= 2 && strings.HasPrefix(dStr, "91") && len(dStr) != 10) {
+		national := dStr
+		if strings.HasPrefix(national, "91") {
+			national = national[2:]
+		}
+		if len(national) < 10 {
+			return "", fmt.Errorf("invalid mobile number: incomplete number (%d digits provided, exactly 10 digits required)", len(national))
+		}
+		if len(national) > 10 {
+			return "", fmt.Errorf("invalid mobile number: Indian phone numbers must contain exactly 10 digits (provided %d digits)", len(national))
+		}
+		return "+91" + national, nil
+	}
+
+	// Case 2: 10 raw digits (standard Indian national number without country prefix)
 	if len(dStr) == 10 {
-		return "+91" + dStr
+		return "+91" + dStr, nil
 	}
 
-	if len(dStr) == 12 && strings.HasPrefix(dStr, "91") {
-		return "+" + dStr
+	// Case 3: Other international numbers with explicit '+' prefix
+	if strings.HasPrefix(phone, "+") {
+		// General E.164 international numbers are 7 to 15 digits
+		if len(dStr) < 7 || len(dStr) > 15 {
+			return "", fmt.Errorf("invalid international phone number length (%d digits)", len(dStr))
+		}
+		return "+" + dStr, nil
 	}
 
-	return "+" + dStr
+	// Default case (assumed Indian number if no other country code):
+	if len(dStr) < 10 {
+		return "", fmt.Errorf("invalid mobile number: incomplete number (%d digits provided, exactly 10 digits required)", len(dStr))
+	}
+	if len(dStr) > 10 {
+		return "", fmt.Errorf("invalid mobile number: Indian phone numbers must contain exactly 10 digits (provided %d digits)", len(dStr))
+	}
+
+	return "+91" + dStr, nil
+}
+
+// NormalizePhone converts any phone string (+91..., 9876..., +91 98765-43210) to standard E.164 (+919876543210)
+func NormalizePhone(phone string) string {
+	normalized, err := ValidateAndNormalizePhone(phone)
+	if err != nil {
+		phone = strings.TrimSpace(phone)
+		if strings.HasPrefix(phone, "+") {
+			return phone
+		}
+		return "+91" + phone
+	}
+	return normalized
 }
 
 func (r *UserRepository) GetByPhone(ctx context.Context, phone string) (*domain.User, error) {
@@ -603,7 +645,7 @@ func (r *UserRepository) GetActiveUserSkillsAssets(ctx context.Context, userID u
 		       COALESCE(sa.attributes, '{}'::jsonb), sa.created_at, sa.updated_at
 		FROM user_skills_assets sa
 		WHERE sa.user_id = $1
-		  AND sa.status = 'ACTIVE'
+		  AND sa.status IN ('ACTIVE', 'APPROVED')
 		  AND sa.is_available = TRUE
 		ORDER BY sa.created_at DESC;
 	`

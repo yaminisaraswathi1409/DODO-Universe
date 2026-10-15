@@ -61,6 +61,33 @@ export interface RequiredDocumentSpec {
   requires_admin_review?: boolean;
 }
 
+export interface ResourceFieldConfig {
+  key: string;
+  label: string;
+  type: 'text' | 'number' | 'select' | 'date' | 'checkbox' | 'textarea';
+  required?: boolean;
+  placeholder?: string;
+  options?: string[];
+}
+
+export interface ResourceOptionConfig {
+  key: string;
+  label: string;
+  description?: string;
+}
+
+export interface ResourceConfig {
+  id?: string;
+  key: string;
+  name: string;
+  description?: string;
+  requirement_level: 'REQUIRED' | 'OPTIONAL' | 'NOT_APPLICABLE';
+  active: boolean;
+  display_order?: number;
+  options?: ResourceOptionConfig[];
+  fields?: ResourceFieldConfig[];
+}
+
 export interface Category {
   id: string;
   slug: string;
@@ -70,8 +97,11 @@ export interface Category {
   default_workflow: string;
   required_documents?: RequiredDocumentSpec[];
   opportunity_fields?: OpportunityFieldSpec[];
-  resources?: any[];
-  resource_requirements?: any[];
+  resources?: ResourceConfig[];
+  resource_requirements?: Record<string, string>;
+  vehicle_fields?: ResourceFieldConfig[];
+  driver_fields?: ResourceFieldConfig[];
+  related_services?: any[];
 }
 
 export interface UserServiceAsset {
@@ -144,12 +174,12 @@ export interface SpatialMatch {
 }
 
 const FALLBACK_CATEGORIES: Category[] = [
-  { 
-    id: '7', 
-    slug: 'bricks-building-materials', 
-    name: 'Bricks & Building Materials', 
-    description: 'Red bricks, fly ash bricks, AAC blocks, sand, gravel', 
-    icon: 'Package', 
+  {
+    id: '7',
+    slug: 'bricks-building-materials',
+    name: 'Bricks & Building Materials',
+    description: 'Red bricks, fly ash bricks, AAC blocks, sand, gravel',
+    icon: 'Package',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'quantity', label: 'Quantity (Number of Bricks)', type: 'number', required: true, placeholder: 'e.g. 5000' },
@@ -158,12 +188,12 @@ const FALLBACK_CATEGORIES: Category[] = [
       { key: 'delivery_access', label: 'Site Access Type', type: 'select', required: false, options: ['10-Wheeler Truck Accessible', 'Tractor Access Only', 'Narrow Street / Manual Unload'] }
     ]
   },
-  { 
-    id: '8', 
-    slug: 'cement-construction', 
-    name: 'Cement & Construction Supplies', 
-    description: 'OPC, PPC, PSC cement bags, steel rebar, binding wire', 
-    icon: 'Layers', 
+  {
+    id: '8',
+    slug: 'cement-construction',
+    name: 'Cement & Construction Supplies',
+    description: 'OPC, PPC, PSC cement bags, steel rebar, binding wire',
+    icon: 'Layers',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'quantity_bags', label: 'Quantity (Bags)', type: 'number', required: true, placeholder: 'e.g. 100' },
@@ -172,12 +202,12 @@ const FALLBACK_CATEGORIES: Category[] = [
       { key: 'brand_preference', label: 'Brand Preference', type: 'select', required: false, options: ['UltraTech', 'Ambuja', 'ACC', 'Ramco', 'Chettinad', 'Any Quality Brand'] }
     ]
   },
-  { 
-    id: '9', 
-    slug: 'vehicle-repair', 
-    name: 'Vehicle Repair & Mechanics', 
-    description: 'Tractor, truck, auto, car repair, mobile mechanic', 
-    icon: 'Wrench', 
+  {
+    id: '9',
+    slug: 'vehicle-repair',
+    name: 'Vehicle Repair & Mechanics',
+    description: 'Tractor, truck, auto, car repair, mobile mechanic',
+    icon: 'Wrench',
     default_workflow: 'INSTANT',
     opportunity_fields: [
       { key: 'vehicle_type', label: 'Vehicle Category', type: 'select', required: true, options: ['Tractor', 'Commercial Truck', 'Auto Rickshaw', 'Four-Wheeler Car', 'Two-Wheeler Bike', 'Heavy Construction Equipment'] },
@@ -247,9 +277,9 @@ export async function getOpportunityByID(id: string): Promise<Opportunity | null
 export function getStoredAuthToken(): string {
   if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000001';
   try {
-    const directToken = localStorage.getItem('uop_token');
+    const directToken = localStorage.getItem('uop_token') || localStorage.getItem('uop_access_token');
     if (directToken && directToken.trim() !== '') return directToken;
-    const userStr = localStorage.getItem('uop_user');
+    const userStr = localStorage.getItem('uop_user') || localStorage.getItem('uop_user_profile');
     if (userStr) {
       const u = JSON.parse(userStr);
       if (u.token) return u.token;
@@ -368,6 +398,21 @@ export async function getAcceptedOpportunities(userIdent: string): Promise<any> 
   }
 }
 
+export async function getCustomerOrders(userIdent: string): Promise<Opportunity[]> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/opportunities/my-orders?user_id=${encodeURIComponent(userIdent)}`, { headers, cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
 export async function verifyPharmacyPickup(oppIdOrData: any, data?: any): Promise<any> {
   try {
     const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
@@ -385,18 +430,32 @@ export async function verifyPharmacyPickup(oppIdOrData: any, data?: any): Promis
 }
 
 export async function confirmTransportResources(oppIdOrData: any, data?: any): Promise<any> {
-  try {
-    const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
-    const targetId = typeof oppIdOrData === 'string' ? oppIdOrData : (oppIdOrData?.opportunity_id || '');
-    const res = await fetch(`${API_BASE_URL}/opportunities/${targetId}/confirm-resources`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(bodyObj),
-    });
-    return res.ok;
-  } catch {
-    return false;
+  const bodyObj = typeof oppIdOrData === 'object' ? oppIdOrData : { opportunity_id: oppIdOrData, ...data };
+  const targetId = typeof oppIdOrData === 'string' ? oppIdOrData : (oppIdOrData?.opportunity_id || '');
+  const token = getStoredAuthToken();
+  const headers: Record<string, string> = {
+    'Content-Type': 'application/json',
+  };
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
   }
+  const res = await fetch(`${API_BASE_URL}/opportunities/${targetId}/confirm-resources`, {
+    method: 'POST',
+    headers,
+    body: JSON.stringify(bodyObj),
+  });
+  if (!res.ok) {
+    let errText = await res.text();
+    try {
+      const parsed = JSON.parse(errText);
+      errText = parsed.error || parsed.message || errText;
+    } catch {
+      // ignore
+    }
+    throw new Error(errText || 'Failed to confirm resource details');
+  }
+  const json = await res.json();
+  return json.data || true;
 }
 
 
@@ -649,6 +708,17 @@ export async function updateCategoryOpportunityFields(categoryId: string, fields
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ opportunity_fields: fields }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function updateCategoryResources(categoryId: string, resources: ResourceConfig[]): Promise<Category | null> {
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${categoryId}/resources`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ resources }),
   });
   if (!res.ok) throw new Error(await res.text());
   const json = await res.json();
@@ -1026,7 +1096,7 @@ export async function markAllNotificationsAsRead(userIdent?: string): Promise<bo
 
 export function getStoredUser(): UserProfile | null {
   if (typeof window === 'undefined') return null;
-  const stored = localStorage.getItem('uop_user_profile');
+  const stored = localStorage.getItem('uop_user') || localStorage.getItem('uop_user_profile');
   if (!stored) return null;
   try {
     return JSON.parse(stored);
@@ -1035,10 +1105,27 @@ export function getStoredUser(): UserProfile | null {
   }
 }
 
+export function saveUserSession(user: UserProfile, token?: string): void {
+  if (typeof window === 'undefined') return;
+  const userJson = JSON.stringify(user);
+  localStorage.setItem('uop_user', userJson);
+  localStorage.setItem('uop_user_profile', userJson);
+  if (user.id) localStorage.setItem('uop_user_id', user.id);
+  if (user.phone) localStorage.setItem('uop_phone', user.phone);
+  if (token) {
+    localStorage.setItem('uop_token', token);
+    localStorage.setItem('uop_access_token', token);
+  }
+}
+
 export function clearUserSession(): void {
   if (typeof window === 'undefined') return;
-  localStorage.removeItem('uop_access_token');
+  localStorage.removeItem('uop_user');
   localStorage.removeItem('uop_user_profile');
+  localStorage.removeItem('uop_user_id');
+  localStorage.removeItem('uop_phone');
+  localStorage.removeItem('uop_token');
+  localStorage.removeItem('uop_access_token');
 }
 
 export interface VendorCatalogItem {
@@ -1058,6 +1145,11 @@ export interface VendorCatalogItem {
   min_order_quantity?: number;
   images?: string[];
   attributes?: Record<string, any>;
+  status?: 'PENDING_ADMIN_APPROVAL' | 'ACTIVE_IN_CATALOG' | 'APPROVED' | 'REJECTED';
+  rejection_reason?: string;
+  pickup_lat?: number;
+  pickup_lng?: number;
+  pickup_address?: string;
   is_available: boolean;
   created_at?: string;
   updated_at?: string;
@@ -1122,6 +1214,66 @@ export async function createCatalogItem(item: Partial<VendorCatalogItem>): Promi
   }
   const json = await res.json();
   return json.data;
+}
+
+export async function createVendorService(payload: any): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/services/create`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to create vendor service');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getAdminCatalogRequests(status = 'PENDING_ADMIN_APPROVAL'): Promise<VendorCatalogItem[]> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/admin/catalog/requests?status=${encodeURIComponent(status)}`, { cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function approveCatalogItem(id: string): Promise<VendorCatalogItem> {
+  const res = await fetch(`${API_BASE_URL}/admin/catalog/${id}/approve`, { method: 'POST' });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function rejectCatalogItem(id: string, rejectionReason: string): Promise<VendorCatalogItem> {
+  const res = await fetch(`${API_BASE_URL}/admin/catalog/${id}/reject`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ rejection_reason: rejectionReason }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function verifyDeliveryOTP(opportunityId: string, otpCode: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/verify-delivery-otp`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ otp_code: otpCode }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Invalid delivery OTP code');
+  }
+  return true;
 }
 
 export async function updateCatalogItem(id: string, item: Partial<VendorCatalogItem>): Promise<VendorCatalogItem> {

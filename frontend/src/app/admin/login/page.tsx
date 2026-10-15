@@ -3,8 +3,9 @@
 import React, { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { requestOTP, verifyOTP, UserProfile } from '@/lib/api';
+import { requestOTP, verifyOTP, UserProfile, getStoredUser, saveUserSession } from '@/lib/api';
 import { ShieldAlert, KeyRound, ArrowRight, RefreshCw, ArrowLeft, Lock } from 'lucide-react';
+import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 export default function AdminLoginPage() {
   const router = useRouter();
@@ -17,22 +18,20 @@ export default function AdminLoginPage() {
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
-      const stored = localStorage.getItem('uop_user');
-      if (stored) {
-        try {
-          const user: UserProfile = JSON.parse(stored);
-          if (user && (user.role === 'ADMIN' || user.role === 'SUPER_ADMIN')) {
-            router.replace('/admin/users');
-          }
-        } catch (e) {}
+      const user = getStoredUser();
+      if (user && (user.role === 'ADMIN' || user.role === 'SUPER_ADMIN')) {
+        if (window.history.length <= 1) {
+          router.push('/admin/users');
+        }
       }
     }
   }, [router]);
 
   const handleRequestOTP = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (!phone) {
-      setError('Please enter a valid Admin phone number');
+    const phoneValidation = validatePhoneNumber(phone);
+    if (!phoneValidation.isValid) {
+      setError(phoneValidation.error || 'Please enter a valid Admin phone number');
       return;
     }
 
@@ -75,13 +74,8 @@ export default function AdminLoginPage() {
           return;
         }
 
-        if (typeof window !== 'undefined') {
-          localStorage.setItem('uop_user', JSON.stringify(user));
-          localStorage.setItem('uop_user_id', user.id);
-          localStorage.setItem('uop_phone', user.phone || phone);
-        }
-
-        router.replace('/admin/users');
+        saveUserSession(user);
+        router.push('/admin/users');
       } else {
         setError('Verification failed');
       }
@@ -93,25 +87,25 @@ export default function AdminLoginPage() {
   };
 
   return (
-    <div className="min-h-screen bg-[#090d16] text-slate-100 flex items-center justify-center p-6 selection:bg-purple-500 selection:text-white">
-      <div className="glass-panel p-8 sm:p-10 rounded-3xl border border-slate-800 w-full max-w-md space-y-6 shadow-2xl">
+    <div className="min-h-screen bg-slate-50 text-slate-900 flex items-center justify-center p-6 font-sans selection:bg-slate-900 selection:text-white">
+      <div className="bg-white p-8 sm:p-10 rounded-3xl border border-slate-200 w-full max-w-md space-y-6 shadow-sm">
         <div>
-          <Link href="/" className="inline-flex items-center gap-1.5 text-xs text-slate-400 hover:text-white mb-4 transition-colors">
+          <Link href="/" className="inline-flex items-center gap-1.5 text-xs text-slate-600 hover:text-black mb-4 transition-colors">
             <ArrowLeft className="w-3.5 h-3.5" />
             <span>Back to Main Platform</span>
           </Link>
-          <div className="w-14 h-14 rounded-2xl bg-purple-600/20 border border-purple-500/30 flex items-center justify-center mx-auto mb-4">
-            <Lock className="w-7 h-7 text-purple-400" />
+          <div className="w-14 h-14 rounded-2xl bg-black flex items-center justify-center mx-auto mb-4 shadow-sm">
+            <Lock className="w-7 h-7 text-white" />
           </div>
-          <h1 className="text-2xl font-extrabold text-white text-center">System Admin Authentication</h1>
-          <p className="text-slate-400 text-xs sm:text-sm text-center mt-2">
+          <h1 className="text-2xl font-extrabold text-slate-900 text-center">System Admin Authentication</h1>
+          <p className="text-slate-500 text-xs sm:text-sm text-center mt-2">
             Restricted System Governance Access
           </p>
         </div>
 
         {error && (
-          <div className="p-3.5 rounded-xl bg-rose-500/10 border border-rose-500/30 text-rose-400 text-xs text-center font-medium flex items-center gap-2">
-            <ShieldAlert className="w-4 h-4 shrink-0 text-rose-400" />
+          <div className="p-3.5 rounded-xl bg-slate-100 border border-slate-300 text-slate-900 text-xs text-center font-medium flex items-center gap-2">
+            <ShieldAlert className="w-4 h-4 shrink-0 text-slate-900" />
             <span>{error}</span>
           </div>
         )}
@@ -119,26 +113,29 @@ export default function AdminLoginPage() {
         {!otpSent ? (
           <form onSubmit={handleRequestOTP} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Admin Mobile Phone Number *</label>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">Admin Mobile Phone Number *</label>
               <div className="relative">
                 <input
-                  type="text"
+                  type="tel"
                   value={phone}
-                  onChange={(e) => setPhone(e.target.value)}
-                  className="w-full px-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500 font-mono"
+                  onChange={(e) => {
+                    setError('');
+                    setPhone(sanitizePhoneInput(e.target.value));
+                  }}
+                  className="w-full px-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black font-mono"
                   placeholder="+919999999999"
                   required
                 />
               </div>
               <p className="text-[11px] text-slate-500 mt-2 font-mono">
-                Super Admin Test Credential: <strong className="text-purple-300">+919999999999</strong>
+                Super Admin Test Credential: <strong className="text-slate-900">+919999999999</strong>
               </p>
             </div>
 
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:opacity-95 text-white font-bold text-sm transition-all shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -156,22 +153,22 @@ export default function AdminLoginPage() {
         ) : (
           <form onSubmit={handleVerifyOTP} className="space-y-4">
             <div>
-              <label className="block text-xs font-semibold text-slate-400 uppercase tracking-wider mb-2">Enter 6-Digit Admin OTP *</label>
+              <label className="block text-xs font-semibold text-slate-700 uppercase tracking-wider mb-2">Enter 6-Digit Admin OTP *</label>
               <div className="relative">
                 <input
                   type="text"
                   value={otpCode}
                   onChange={(e) => setOtpCode(e.target.value)}
-                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-slate-900/80 border border-slate-800 text-white text-sm focus:outline-none focus:border-purple-500 font-mono tracking-widest text-center font-bold text-lg"
+                  className="w-full pl-10 pr-4 py-3 rounded-xl bg-white border border-slate-300 text-slate-900 text-sm focus:outline-none focus:border-black font-mono tracking-widest text-center font-bold text-lg"
                   placeholder="123456"
                   maxLength={6}
                   required
                 />
-                <KeyRound className="w-4 h-4 text-purple-400 absolute left-3.5 top-3.5" />
+                <KeyRound className="w-4 h-4 text-slate-700 absolute left-3.5 top-3.5" />
               </div>
               {demoOtp && (
-                <div className="p-3 mt-3 rounded-xl bg-purple-500/10 border border-purple-500/30 text-purple-300 text-xs text-center font-mono font-semibold">
-                  Development Mode OTP: <span className="text-white text-sm font-bold">{demoOtp}</span>
+                <div className="p-3 mt-3 rounded-xl bg-slate-100 border border-slate-200 text-slate-900 text-xs text-center font-mono font-semibold">
+                  Development Mode OTP: <span className="text-slate-900 text-sm font-bold">{demoOtp}</span>
                 </div>
               )}
             </div>
@@ -179,7 +176,7 @@ export default function AdminLoginPage() {
             <button
               type="submit"
               disabled={loading}
-              className="w-full py-3.5 rounded-xl bg-gradient-to-r from-purple-600 via-indigo-600 to-blue-600 hover:opacity-95 text-white font-bold text-sm transition-all shadow-lg shadow-purple-600/30 flex items-center justify-center gap-2"
+              className="w-full py-3.5 rounded-xl bg-black hover:bg-slate-800 text-white font-bold text-sm transition-all shadow-sm flex items-center justify-center gap-2"
             >
               {loading ? (
                 <>
@@ -197,7 +194,7 @@ export default function AdminLoginPage() {
             <button
               type="button"
               onClick={() => setOtpSent(false)}
-              className="w-full text-center text-xs text-slate-400 hover:text-white mt-2 block"
+              className="w-full text-center text-xs text-slate-600 hover:text-black mt-2 block"
             >
               ← Change Mobile Number
             </button>
