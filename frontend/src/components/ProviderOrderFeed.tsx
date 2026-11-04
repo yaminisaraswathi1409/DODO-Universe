@@ -11,9 +11,14 @@ import {
   uploadProofOfDelivery,
   triggerLogisticsCascade,
   confirmTransportResources,
+  executeVendorOrderAction,
+  registerProofOfLoadingExtended,
+  registerProofOfDeliveryExtended,
+  verifySecureDeliveryOTP,
+  transitionOrderStatus,
   Opportunity,
 } from '@/lib/api';
-import { CheckCircle2, MapPin, Calendar, Clock, Tag, UserCheck, AlertCircle, RefreshCw, Layers, Wrench, Package, Truck, Eye, X, ArrowRight, Check, Ban, QrCode, Sparkles, ShieldCheck, Phone, Users, Plus, Store, Edit3, Zap } from 'lucide-react';
+import { CheckCircle2, MapPin, Calendar, Clock, Tag, UserCheck, AlertCircle, RefreshCw, Layers, Wrench, Package, Truck, Eye, X, ArrowRight, Check, Ban, QrCode, Sparkles, ShieldCheck, Phone, Users, Plus, Store, Edit3, Zap, Compass } from 'lucide-react';
 import { sanitizePhoneInput, validatePhoneNumber } from '@/lib/phoneUtils';
 
 interface ProviderOrderFeedProps {
@@ -724,9 +729,14 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
           <Package className="w-10 h-10 mx-auto text-slate-400" />
           <p className="font-semibold text-slate-700">
             {activeTab === 'accepted'
-              ? 'No accepted orders yet. Click "Incoming Requests" above to review and accept available requests.'
-              : 'No matching customer service requests found in your area right now.'}
+              ? 'No accepted orders yet. Click "Incoming Requests" above to review available requests.'
+              : 'No matching customer service requests or route delivery offers found along your corridor right now.'}
           </p>
+          {activeTab === 'matching' && (
+            <p className="text-slate-400 text-[11px] max-w-md mx-auto">
+              If you travel regularly between towns or villages, register your commute corridor under <strong>My Journeys</strong> to automatically receive delivery offers matching your travel path.
+            </p>
+          )}
         </div>
       ) : (
         <div className="grid sm:grid-cols-2 gap-4">
@@ -763,6 +773,14 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
             const deliveryLoc = opp.address_text || meta.delivery_location || 'Customer Selected Delivery Address';
             const distanceKm = opp.radius_km || 15;
             const isAccepted = ['ACCEPTED', 'PROVIDER_ACCEPTED', 'IN_PROGRESS', 'DISPATCHED', 'IN_TRANSIT', 'DELIVERED', 'COMPLETED'].includes(opp.status);
+            const isCommuterDelivery = 
+              opp.order_mode === 'JOURNEY' ||
+              opp.order_mode === 'JOURNEY_MATCH' ||
+              (opp as any).delivery_partner_id === 'COMMUTER' ||
+              meta.commuter_eligible === true ||
+              meta.commuter_matched === true ||
+              Boolean(meta.commuter_journey_id) ||
+              Boolean(meta.match_detour_km);
 
             return (
               <div
@@ -776,7 +794,12 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
                 <div className="space-y-3">
                   {/* SERVICE REQUEST Header Tag */}
                   <div className="flex items-center justify-between">
-                    {opp.order_mode === 'CATALOG_ORDER' ? (
+                    {isCommuterDelivery && !isAccepted ? (
+                      <span className="px-3 py-1 rounded-lg bg-emerald-700 text-white text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5 shadow-sm">
+                        <Compass className="w-3.5 h-3.5 text-white" />
+                        <span>Route Delivery Offer (Voluntary)</span>
+                      </span>
+                    ) : opp.order_mode === 'CATALOG_ORDER' ? (
                       <span className="px-3 py-1 rounded-lg bg-slate-900 text-white text-[10px] font-extrabold uppercase tracking-wider flex items-center gap-1.5">
                         <Store className="w-3.5 h-3.5 text-white" />
                         <span>Direct Catalog Order</span>
@@ -897,6 +920,23 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
                       <span className="text-slate-500 font-bold uppercase text-[10px]">Delivery Address</span>
                       <span className="text-slate-800 font-semibold truncate max-w-[180px]">{deliveryLoc}</span>
                     </div>
+
+                    {isCommuterDelivery && (
+                      <div className="pt-2 border-t border-slate-200 space-y-1.5">
+                        <div className="flex items-center justify-between">
+                          <span className="text-emerald-700 font-bold uppercase text-[10px] flex items-center gap-1">
+                            <Compass className="w-3 h-3 text-emerald-600" /> Route Corridor Detour
+                          </span>
+                          <span className="text-emerald-900 font-extrabold font-mono text-[11px]">
+                            {meta.match_detour_km ? `~${meta.match_detour_km} km` : 'Minor Detour (< 2 km)'}
+                          </span>
+                        </div>
+                        <div className="p-2 rounded-xl bg-emerald-50 border border-emerald-200 text-emerald-800 text-[10px] flex items-center gap-1.5 font-medium">
+                          <CheckCircle2 className="w-3 h-3 text-emerald-600 shrink-0" />
+                          <span>Accepting is 100% voluntary along your route.</span>
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   {/* Status Banner when Accepted / Completed */}
@@ -1352,7 +1392,59 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
                         </button>
                       );
                     })()
-                  ) : opp.status === 'IN_PROGRESS' || opp.status === 'DISPATCHED' ? (
+                  ) : opp.status === 'ORDER_CONFIRMED' || opp.status === 'VENDOR_REVIEW' ? (
+                    <div className="flex items-center gap-2 w-full">
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            let currentUser = null;
+                            if (typeof window !== 'undefined') {
+                              const u = localStorage.getItem('uop_user');
+                              if (u) currentUser = JSON.parse(u);
+                            }
+                            const vendorId = currentUser?.id || opp.target_vendor_id || opp.assigned_user_id;
+                            await executeVendorOrderAction(opp.id, vendorId, { action: 'ACCEPT' });
+                            setMessage(`Order #${opp.id.slice(0, 8)} accepted for fulfilment!`);
+                            loadRequests();
+                          } catch (err: any) {
+                            alert(`Error accepting order: ${err.message || err}`);
+                          }
+                        }}
+                        className="flex-1 py-3 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                      >
+                        <Check className="w-4 h-4 text-white" />
+                        <span>Accept Order</span>
+                      </button>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          const reason = prompt('Please enter the mandatory reason for rejecting this order:');
+                          if (!reason || !reason.trim()) {
+                            alert('Rejection reason is required.');
+                            return;
+                          }
+                          try {
+                            let currentUser = null;
+                            if (typeof window !== 'undefined') {
+                              const u = localStorage.getItem('uop_user');
+                              if (u) currentUser = JSON.parse(u);
+                            }
+                            const vendorId = currentUser?.id || opp.target_vendor_id || opp.assigned_user_id;
+                            await executeVendorOrderAction(opp.id, vendorId, { action: 'REJECT', rejection_reason: reason.trim() });
+                            setMessage(`Order #${opp.id.slice(0, 8)} rejected.`);
+                            loadRequests();
+                          } catch (err: any) {
+                            alert(`Error rejecting order: ${err.message || err}`);
+                          }
+                        }}
+                        className="px-4 py-3 rounded-xl bg-rose-50 border border-rose-300 text-rose-700 hover:bg-rose-100 font-bold text-xs flex items-center justify-center gap-1 transition-all"
+                      >
+                        <Ban className="w-4 h-4 text-rose-600" />
+                        <span>Reject</span>
+                      </button>
+                    </div>
+                  ) : opp.status === 'VENDOR_ACCEPTED' ? (
                     <button
                       type="button"
                       onClick={async () => {
@@ -1362,18 +1454,114 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
                             const u = localStorage.getItem('uop_user');
                             if (u) currentUser = JSON.parse(u);
                           }
-                          const userIdent = currentUser?.id || currentUser?.phone;
-                          await updateOpportunityStatus(opp.id, 'DELIVERED', userIdent);
-                          setMessage(`Order #${opp.id.slice(0, 8)} marked as DELIVERED / COMPLETED!`);
+                          const vendorId = currentUser?.id || opp.target_vendor_id || opp.assigned_user_id;
+                          await executeVendorOrderAction(opp.id, vendorId, { action: 'PREPARE', preparation_notes: 'Preparing order items and inventory allocation' });
+                          setMessage(`Order #${opp.id.slice(0, 8)} is now being prepared!`);
                           loadRequests();
                         } catch (err: any) {
-                          alert(`Error completing order: ${err.message || err}`);
+                          alert(`Error preparing order: ${err.message || err}`);
+                        }
+                      }}
+                      className="w-full py-3 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                    >
+                      <Package className="w-4 h-4 text-white" />
+                      <span>Start Fulfilment Preparation</span>
+                    </button>
+                  ) : opp.status === 'FULFILMENT_PREPARATION' || opp.status === 'PREPARING' ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        try {
+                          let currentUser = null;
+                          if (typeof window !== 'undefined') {
+                            const u = localStorage.getItem('uop_user');
+                            if (u) currentUser = JSON.parse(u);
+                          }
+                          const vendorId = currentUser?.id || opp.target_vendor_id || opp.assigned_user_id;
+                          await executeVendorOrderAction(opp.id, vendorId, { action: 'READY_FOR_PICKUP' });
+                          setMessage(`Order #${opp.id.slice(0, 8)} is packaged and ready for pickup!`);
+                          loadRequests();
+                        } catch (err: any) {
+                          alert(`Error updating ready status: ${err.message || err}`);
+                        }
+                      }}
+                      className="w-full py-3 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                    >
+                      <CheckCircle2 className="w-4 h-4 text-white" />
+                      <span>Confirm Ready for Pickup</span>
+                    </button>
+                  ) : opp.status === 'READY_FOR_PICKUP' ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const photoUrl = prompt('Enter Proof of Loading (PoL) photo URL:', 'https://images.unsplash.com/photo-1586528116311-ad8dd3c8310d?w=600');
+                        if (!photoUrl) return;
+                        try {
+                          await registerProofOfLoadingExtended({
+                            opportunity_id: opp.id,
+                            photo_urls: [photoUrl],
+                            loaded_quantity: opp.quantity || 1,
+                            cargo_unit: opp.price_unit || 'UNITS',
+                            authorized_by_name: 'Verified Vendor Yard Supervisor',
+                            driver_notes: 'Cargo verified and secured on vehicle bed',
+                          });
+                          setMessage(`Proof of Loading registered! Order is now IN_TRANSIT.`);
+                          loadRequests();
+                        } catch (err: any) {
+                          alert(`Error recording Proof of Loading: ${err.message || err}`);
+                        }
+                      }}
+                      className="w-full py-3 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                    >
+                      <Truck className="w-4 h-4 text-white" />
+                      <span>Verify & Upload Proof of Loading (PoL)</span>
+                    </button>
+                  ) : opp.status === 'IN_TRANSIT' || opp.status === 'IN_PROGRESS' || opp.status === 'DISPATCHED' ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const recipient = prompt('Enter recipient full name at delivery address:', opp.user?.full_name || 'Customer');
+                        if (!recipient) return;
+                        try {
+                          await registerProofOfDeliveryExtended({
+                            opportunity_id: opp.id,
+                            recipient_name: recipient,
+                            delivered_quantity: opp.quantity || 1,
+                            cargo_unit: opp.price_unit || 'UNITS',
+                            delivery_notes: 'Delivered at site location. Recipient acknowledged cargo receipt.',
+                          });
+                          setMessage(`Proof of Delivery recorded! Order is marked DELIVERED.`);
+                          loadRequests();
+                        } catch (err: any) {
+                          alert(`Error recording delivery: ${err.message || err}`);
                         }
                       }}
                       className="w-full py-3 rounded-xl bg-black hover:bg-slate-800 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
                     >
                       <ShieldCheck className="w-4 h-4 text-white" />
-                      <span>Complete & Confirm Delivery</span>
+                      <span>Record Proof of Delivery (PoD)</span>
+                    </button>
+                  ) : opp.status === 'DELIVERED' ? (
+                    <button
+                      type="button"
+                      onClick={async () => {
+                        const otp = prompt('Please enter the customer 6-digit Delivery Handshake OTP:');
+                        if (!otp || !otp.trim()) {
+                          alert('Delivery OTP is required to complete delivery and release escrow.');
+                          return;
+                        }
+                        try {
+                          await verifySecureDeliveryOTP(opp.id, otp.trim());
+                          setMessage(`Delivery Handshake Verified! Escrow settled and order COMPLETED.`);
+                          loadRequests();
+                        } catch (err: any) {
+                          alert(`OTP Verification failed: ${err.message || err}`);
+                        }
+                      }}
+                      className="w-full py-3 rounded-xl bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold text-xs flex items-center justify-center gap-2 transition-all shadow-md"
+                    >
+                      <ShieldCheck className="w-4 h-4 text-white" />
+                      <span>Verify Customer Delivery OTP & Settle Escrow</span>
                     </button>
                   ) : (
                     <button
@@ -1445,9 +1633,40 @@ export default function ProviderOrderFeed({ isAcceptedView = false, initialSubTa
                 const subtotal = meta.subtotal || (unitPrice > 0 && typeof rawQuantity === 'number' ? unitPrice * rawQuantity : orderTotal);
 
                 const { isVehicleConfigured, isDriverConfigured, customerHasVeh, customerHasDrv } = getResourceConfig(reviewingOpp);
+                const isCommuterReview =
+                  reviewingOpp.order_mode === 'JOURNEY' ||
+                  reviewingOpp.order_mode === 'JOURNEY_MATCH' ||
+                  (reviewingOpp as any).delivery_partner_id === 'COMMUTER' ||
+                  meta.commuter_eligible === true ||
+                  meta.commuter_matched === true ||
+                  Boolean(meta.commuter_journey_id) ||
+                  Boolean(meta.match_detour_km);
 
                 return (
                   <div className="space-y-4 bg-slate-50 border border-slate-200 p-5 rounded-2xl text-xs">
+                    {/* Commuter Offer Voluntary Banner */}
+                    {isCommuterReview && (
+                      <div className="p-4 rounded-2xl bg-emerald-50 border border-emerald-200 text-emerald-950 space-y-2 text-xs">
+                        <div className="flex items-center gap-2 font-extrabold text-emerald-900">
+                          <Compass className="w-4 h-4 text-emerald-700" />
+                          <span>Route Delivery Candidate Offer (Voluntary)</span>
+                        </div>
+                        <p className="text-emerald-800 text-[11px] leading-relaxed">
+                          This delivery opportunity matches your registered travel corridor. Accepting is completely optional. If accepted, you will pick up the package en-route and deliver it near your destination.
+                        </p>
+                        <div className="grid grid-cols-2 gap-2 pt-1 font-mono text-[11px]">
+                          <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-200">
+                            <span className="text-slate-500 block text-[9px] uppercase font-bold">Estimated Route Detour</span>
+                            <span className="font-extrabold text-slate-800">{meta.match_detour_km ? `~${meta.match_detour_km} km` : 'Minor Detour (< 2 km)'}</span>
+                          </div>
+                          <div className="bg-white/90 p-2.5 rounded-xl border border-emerald-200">
+                            <span className="text-slate-500 block text-[9px] uppercase font-bold">Proposed Route Payout</span>
+                            <span className="font-extrabold text-emerald-700">₹{orderTotal > 0 ? Number(orderTotal).toLocaleString('en-IN') : (meta.commuter_payout || '30 - 50')}</span>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+
                     {/* Order Reference & Timestamps */}
                     <div className="flex items-center justify-between pb-3 border-b border-slate-200">
                       <span className="font-mono text-black font-extrabold text-sm">

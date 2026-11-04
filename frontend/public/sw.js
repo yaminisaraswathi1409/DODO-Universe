@@ -1,9 +1,11 @@
-const CACHE_NAME = 'uop-pwa-cache-v1';
+const CACHE_NAME = 'uop-pwa-cache-v2';
 const STATIC_ASSETS = [
   '/',
   '/manifest.json',
   '/categories',
   '/opportunities',
+  '/icons/icon-192x192.png',
+  '/icons/icon-512x512.png',
 ];
 
 self.addEventListener('install', (event) => {
@@ -33,7 +35,17 @@ self.addEventListener('activate', (event) => {
 });
 
 self.addEventListener('fetch', (event) => {
-  if (event.request.method !== 'GET') return;
+  // Only handle GET requests
+  if (event.request.method !== 'GET') {
+    return;
+  }
+
+  const url = new URL(event.request.url);
+
+  // Bypass service worker completely for API requests and backend calls (e.g. /api/ or port 8080)
+  if (url.pathname.startsWith('/api') || url.port === '8080') {
+    return;
+  }
 
   event.respondWith(
     fetch(event.request)
@@ -46,14 +58,25 @@ self.addEventListener('fetch', (event) => {
         }
         return networkResponse;
       })
-      .catch(() => {
-        return caches.match(event.request).then((cachedResponse) => {
-          if (cachedResponse) {
-            return cachedResponse;
+      .catch(async () => {
+        const cachedResponse = await caches.match(event.request);
+        if (cachedResponse) {
+          return cachedResponse;
+        }
+
+        const acceptHeader = event.request.headers.get('accept') || '';
+        if (acceptHeader.includes('text/html')) {
+          const rootCached = await caches.match('/');
+          if (rootCached) {
+            return rootCached;
           }
-          if (event.request.headers.get('accept').includes('text/html')) {
-            return caches.match('/');
-          }
+        }
+
+        // Return a valid fallback Response instead of undefined to prevent "Failed to convert value to 'Response'"
+        return new Response('Network offline or resource unavailable', {
+          status: 503,
+          statusText: 'Service Unavailable',
+          headers: { 'Content-Type': 'text/plain' },
         });
       })
   );

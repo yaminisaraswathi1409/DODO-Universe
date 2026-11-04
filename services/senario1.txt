@@ -1,0 +1,583 @@
+DODO-UNIVERSE
+
+Scenario 1 — Dynamic Order, Transport, Driver & Recovery Requirements
+
+Ordered Functional Requirements / Business Rules
+
+
+1. PURPOSE
+
+Scenario 1 defines a flexible order-to-delivery workflow in which the customer first orders a product or service, then declares what transport resources they already have or want to arrange.
+
+The accepted service provider completes any missing vehicle or driver arrangements.
+
+Transport incidents, mechanics, spare parts, and labour are added only when actually needed.
+
+The same architecture must support many products, services, vehicle types, providers, and future resource types without hardcoding a single workflow.
+
+
+2. CORE OPERATING PRINCIPLE
+
+Customer orders the product/service first.
+
+Customer records whether they already have a vehicle and/or driver, or want those resources arranged.
+
+Only approved/eligible providers who opted into the requested service should receive the matching order.
+
+Before acceptance, the provider sees the real order details and can Accept or Decline.
+
+After acceptance, the provider becomes responsible for fulfilment and for arranging only the missing resources.
+
+Breakdown, mechanic, spare-parts, loading, and unloading resources are optional and triggered only when required.
+
+
+3. CUSTOMER BOOKING — VEHICLE CHOICE
+
+During booking, show exactly these three options:
+
+1. I will book a vehicle
+2. I have a vehicle / Myself
+3. I do not have a vehicle
+
+If the customer chooses "I have a vehicle / Myself", show a dynamic/admin-configurable vehicle form.
+
+Suggested core fields:
+
+- Vehicle Type
+- Vehicle Registration Number
+- Vehicle Owner Name
+- Vehicle Contact Number
+
+Admin may add other vehicle fields such as:
+
+- Model
+- Capacity
+- Vehicle Photo
+- RC/Document
+- Insurance
+- Other business-specific information
+
+Required/optional status, labels, field types, and validation must be configurable.
+
+
+4. CUSTOMER BOOKING — DRIVER CHOICE
+
+During booking, show exactly these three options:
+
+1. I will book a driver
+2. I have a driver / Myself
+3. I do not have a driver
+
+If the customer chooses "I have a driver / Myself", show a dynamic/admin-configurable driver form.
+
+Suggested core fields:
+
+- Driver Name
+- Driver Phone
+- Driving Licence Details — when required
+- Driver Photo — when required
+- Other Admin-configured information
+
+Admin must be able to add, remove, or configure driver fields without hardcoding a separate form for each service.
+
+
+5. VEHICLE + DRIVER COMBINATION RULES
+
+Vehicle and driver are independent resources.
+
+The platform must support any valid combination of the three vehicle choices and three driver choices.
+
+Customer vehicle choice:
+I have a vehicle / Myself
+
+Customer driver choice:
+I have a driver / Myself
+
+Result after provider acceptance:
+Provider uses customer-supplied vehicle and driver; no additional booking required.
+
+
+Customer vehicle choice:
+I have a vehicle / Myself
+
+Customer driver choice:
+I do not have a driver
+
+Result after provider acceptance:
+Provider sees vehicle details and arranges a driver.
+
+
+Customer vehicle choice:
+I do not have a vehicle
+
+Customer driver choice:
+I have a driver / Myself
+
+Result after provider acceptance:
+Provider sees driver details and arranges a vehicle.
+
+
+Customer vehicle choice:
+I do not have a vehicle
+
+Customer driver choice:
+I do not have a driver
+
+Result after provider acceptance:
+Provider arranges both vehicle and driver.
+
+
+Customer vehicle choice:
+I will book a vehicle
+
+Customer driver choice:
+I will book a driver
+
+Result after provider acceptance:
+Customer places the service order; after acceptance, provider completes both bookings.
+
+
+Customer vehicle choice:
+I will book a vehicle
+
+Customer driver choice:
+I have a driver / Myself
+
+Result after provider acceptance:
+Provider arranges vehicle; customer-provided driver is used.
+
+
+Customer vehicle choice:
+I have a vehicle / Myself
+
+Customer driver choice:
+I will book a driver
+
+Result after provider acceptance:
+Provider arranges driver; customer-provided vehicle is used.
+
+
+Customer vehicle choice:
+I will book a vehicle
+
+Customer driver choice:
+I do not have a driver
+
+Result after provider acceptance:
+Provider arranges both vehicle and driver.
+
+
+Customer vehicle choice:
+I do not have a vehicle
+
+Customer driver choice:
+I will book a driver
+
+Result after provider acceptance:
+Provider arranges vehicle; driver is handled through the selected/required driver arrangement.
+
+
+6. CUSTOMER ORDER SUBMISSION
+
+The customer should complete the product/service order before transport execution begins.
+
+The order captures:
+
+- Requested service
+- Exact quantity
+- Delivery address
+- Service-specific details
+- Vehicle choice
+- Driver choice
+- Customer-provided vehicle information, when applicable
+- Customer-provided driver information, when applicable
+
+If the customer selected "I will book a vehicle" or "I will book a driver", the customer does not need to complete that booking before submitting the service order.
+
+The accepted service provider can arrange the missing resources afterward.
+
+
+7. PROVIDER MATCHING AND ACCEPTANCE
+
+After the customer submits the order, the system should identify users/providers who are already approved and opted into the requested service/category and who satisfy the existing matching rules.
+
+Before acceptance, the provider must see accurate data from the actual order record:
+
+- Service/category
+- Exact quantity
+- Required date/time
+- Delivery location
+- Pickup/source location, when applicable
+- Dynamic service-specific details
+- Customer vehicle choice and customer-provided vehicle details, when supplied
+- Customer driver choice and customer-provided driver details, when supplied
+
+The provider must have clear actions:
+
+[Accept Order]
+[Decline]
+
+Only after acceptance does the order move into the provider's "My Jobs".
+
+Declined providers do not receive the order in My Jobs, and the request remains available to other eligible providers.
+
+
+8. INFORMATION AVAILABLE AFTER PROVIDER ACCEPTANCE
+
+Only the provider who accepted the order should receive the operational contact information necessary for fulfilment.
+
+The provider should be able to see:
+
+- Customer name
+- Customer phone number
+- Relevant pickup/delivery location
+- Customer-provided vehicle details, when supplied
+- Customer-provided driver details, when supplied
+
+The provider can contact the customer to coordinate:
+
+- Pickup date/time
+- Delivery timing
+- Vehicle arrival
+- Driver arrival
+- Other necessary details
+
+
+9. MISSING VEHICLE / DRIVER ARRANGEMENTS
+
+After acceptance, the service provider fills only the missing transport resources.
+
+Customer has vehicle + no driver
+→ Provider arranges/books driver.
+
+Customer has no vehicle + driver
+→ Provider arranges/books vehicle.
+
+Customer has neither
+→ Provider arranges/books both vehicle and driver.
+
+Customer has both
+→ No unnecessary vehicle/driver booking is created.
+
+Vehicle and driver remain independently bookable.
+
+A truck owner may also be the driver or may have a separate driver.
+
+A provider may book one resource while using the other resource supplied by the customer.
+
+
+10. DYNAMIC VEHICLE AND DRIVER SERVICES
+
+Vehicle and driver services must use the existing dynamic service/category architecture.
+
+Admin should be able to configure vehicle types and driver requirements without code changes.
+
+Vehicle examples:
+
+- Truck
+- 10-wheeler
+- 12-wheeler
+- Trailer
+- Mini truck
+- Tractor
+- Future vehicle types
+
+Driver services may be offered as an independent service/resource.
+
+Vehicle and driver fields must be dynamically configurable.
+
+
+11. LOADING AND UNLOADING LABOUR
+
+The logistics workflow must also support optional loading and unloading labour.
+
+These are separate resources that may be requested by the customer or accepted service provider when needed.
+
+Loading labour can be requested at the pickup/source location.
+
+Unloading labour can be requested at the destination.
+
+Labour quantity, timing, location, eligibility, provider matching, and charges must be dynamic.
+
+Do not automatically create labour requests when they are not needed.
+
+The responsible party for labour charges must be explicit and shown separately.
+
+
+12. TRANSPORT EXECUTION
+
+Once the required vehicle/driver resources are available, the transport workflow can proceed through:
+
+- Dispatch
+- In-transit monitoring
+- Delivery
+
+The exact resource steps should depend on the choices made and the requirements of the service.
+
+
+13. BREAKDOWN / EMERGENCY REPAIR
+
+A mechanic workflow starts only after a genuine transport problem is reported.
+
+Driver, truck owner, or accepted service provider may report the vehicle problem.
+
+The reporter can upload:
+
+- Issue photos
+- Video
+- Problem description
+- Current location
+
+The issue evidence must be visible to the truck owner and Admin for trust/audit purposes.
+
+Nearby eligible mechanics can be found using the existing location/PostGIS matching.
+
+A mechanic can accept the repair request and resolve the issue.
+
+After repair, the journey resumes and continues toward delivery.
+
+
+14. SPARE PARTS PROCUREMENT
+
+If the mechanic determines that a spare part is required:
+
+Driver, truck owner, or accepted service provider can search nearby automobile/spare-parts providers in DODO-Universe.
+
+If an appropriate part is available in the app, it can be requested/purchased through the platform.
+
+If no suitable part/provider is available in the app, the driver/provider may obtain it offline.
+
+Offline procurement must not block repair or delivery completion.
+
+The event/cost can still be recorded for audit and settlement.
+
+
+15. COST RESPONSIBILITY
+
+Product/service price
+Responsible party:
+Customer / service order
+
+
+Agreed transport charge
+Responsible party:
+As defined for the order; customer pays only when transport is part of the customer-facing arrangement
+
+
+Driver charge when provider arranges driver
+Responsible party:
+Service provider, as applicable to fulfilment
+
+
+Mechanic / repair charges caused by truck problem
+Responsible party:
+Truck/vehicle owner
+
+
+Spare-part charges caused by truck problem
+Responsible party:
+Truck/vehicle owner
+
+
+Loading/unloading labour
+Responsible party:
+Configured responsible party; shown separately
+
+
+If driver pays an emergency cost first
+Driver records proof and requests reimbursement from the responsible vehicle owner.
+
+
+The customer should not be unexpectedly charged for truck breakdown, mechanic, or spare-parts costs.
+
+Customer billing should remain limited to:
+
+- Agreed product/service price
+- Applicable transport/delivery charges
+- Applicable GST/taxes
+
+
+16. BREAKDOWN TRUST, EVIDENCE AND NOTIFICATIONS
+
+Notify the responsible truck owner when a breakdown, repair, or spare-part cost is raised.
+
+Notify Admin for visibility and audit.
+
+Store uploaded photos/videos and supporting information against the relevant transport/repair workflow record.
+
+Record:
+
+- Who reported the issue
+- Who booked the mechanic
+- Who booked the spare part
+
+
+17. LOCATION-BASED MARKETPLACE RESOURCES
+
+The marketplace must support location-based provider/resource discovery.
+
+Registered members can publish what they currently offer within a configurable radius.
+
+Example:
+
+A bricks provider can advertise:
+
+200 bricks available within 50 km.
+
+A transport provider can advertise:
+
+An available vehicle within a defined radius.
+
+Customers/providers see suitable nearby offers based on location.
+
+Search and ranking should use:
+
+- Location
+- Existing matching rules
+
+Radius must be configurable.
+
+Quantity and availability must come from real provider data.
+
+Do not hardcode:
+
+- Radius
+- Inventory
+- Provider identity
+- Vehicle type
+- Availability
+
+The same model must support:
+
+- Materials
+- Vehicles
+- Drivers
+- Mechanics
+- Spare parts
+- Loading labour
+- Unloading labour
+
+
+18. DYNAMIC ARCHITECTURE RULE
+
+Treat the following as dynamic resources/services:
+
+- Vehicle
+- Driver
+- Transport
+- Mechanic
+- Spare Parts
+- Loading Labour
+- Unloading Labour
+
+Each resource can be:
+
+- Introduced
+- Configured
+- Approved
+- Matched
+- Booked
+- Billed
+
+without creating a separate hardcoded workflow.
+
+
+19. TARGET END-TO-END WORKFLOW
+
+1. Customer selects a product/service and exact quantity.
+
+2. Customer confirms delivery address and service-specific details.
+
+3. Customer selects Vehicle:
+   - I will book
+   - I have vehicle
+   - I do not have vehicle
+
+4. Customer selects Driver:
+   - I will book
+   - I have driver
+   - I do not have driver
+
+5. If customer provides vehicle/driver, the configured details are captured dynamically.
+
+6. Customer submits the order.
+
+7. Approved/eligible providers who opted into the requested service receive the matching request.
+
+8. Provider reviews the real order data and chooses:
+   - Accept
+   - Decline
+
+9. After acceptance, provider receives the required customer, vehicle, driver, and location details for fulfilment.
+
+10. Provider arranges any missing vehicle/driver resources.
+
+11. Optional loading/unloading labour is added only when required.
+
+12. Transport begins.
+
+13. If a breakdown occurs, driver/owner/provider reports the issue with evidence.
+
+14. Nearby mechanic is matched; spare parts are obtained in-app or offline if required.
+
+15. Repair is completed and transport resumes.
+
+16. Delivery is completed and proof is recorded.
+
+17. Customer receives the agreed invoice without unexpected truck-repair costs.
+
+18. Provider/truck-owner/driver settlements are recorded separately according to responsibility.
+
+
+20. IMPLEMENTATION RULES FOR THE EXISTING CODEBASE
+
+Before implementing any part, inspect the existing:
+
+- Database
+- Migrations
+- APIs
+- Matching system
+- Transport system
+- Driver system
+- Repair system
+- Parts system
+- Labour system
+- Dynamic configuration
+
+Reuse existing structures whenever possible.
+
+If a feature is already implemented, keep it and fix only what is necessary.
+
+If a feature is partially implemented, complete the missing portion instead of rebuilding it.
+
+Do not create duplicate:
+
+- Tables
+- APIs
+- Order systems
+- Provider systems
+- Dynamic-field systems
+
+Use the database/backend as the source of truth.
+
+Do not use hardcoded:
+
+- Quantities
+- Provider names
+- Vehicle types
+- Prices
+- Locations
+- Service-specific fields
+
+Do not create:
+
+- Transport workflows
+- Driver workflows
+- Mechanic workflows
+- Parts workflows
+- Labour workflows
+
+unless the corresponding resource is actually required.
+
+
+END OF REQUIREMENTS DOCUMENT

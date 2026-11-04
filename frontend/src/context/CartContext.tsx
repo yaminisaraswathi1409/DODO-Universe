@@ -1,6 +1,7 @@
 'use client';
 
 import React, { createContext, useContext, useState, useEffect } from 'react';
+import CartVendorConflictModal from '@/components/CartVendorConflictModal';
 
 export interface CartItem {
   id: string;
@@ -42,9 +43,17 @@ export interface CartItem {
   addedAt: string;
 }
 
+export interface VendorConflictData {
+  newItem: Omit<CartItem, 'id' | 'addedAt'>;
+  currentVendorName: string;
+  newVendorName: string;
+  currentVendorId: string;
+  newVendorId: string;
+}
+
 interface CartContextType {
   cartItems: CartItem[];
-  addToCart: (item: Omit<CartItem, 'id' | 'addedAt'>) => void;
+  addToCart: (item: Omit<CartItem, 'id' | 'addedAt'>, forceReplace?: boolean) => void;
   removeFromCart: (id: string) => void;
   updateQuantity: (id: string, delta: number) => void;
   setCartItemQuantity: (id: string, newQty: number) => void;
@@ -56,6 +65,8 @@ interface CartContextType {
   platformFee: number;
   taxAmount: number;
   cartTotal: number;
+  pendingVendorConflict: VendorConflictData | null;
+  resolveVendorConflict: (action: 'REPLACE' | 'CANCEL') => void;
 }
 
 const CartContext = createContext<CartContextType | undefined>(undefined);
@@ -63,6 +74,7 @@ const CartContext = createContext<CartContextType | undefined>(undefined);
 export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   const [cartItems, setCartItems] = useState<CartItem[]>([]);
   const [isCartOpen, setIsCartOpen] = useState(false);
+  const [pendingVendorConflict, setPendingVendorConflict] = useState<VendorConflictData | null>(null);
 
   useEffect(() => {
     if (typeof window !== 'undefined') {
@@ -84,8 +96,8 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
     }
   };
 
-  const addToCart = (newItem: Omit<CartItem, 'id' | 'addedAt'>) => {
-    const existingIndex = cartItems.findIndex(
+  const executeAdd = (newItem: Omit<CartItem, 'id' | 'addedAt'>, currentItems: CartItem[]) => {
+    const existingIndex = currentItems.findIndex(
       (item) =>
         ((newItem.catalogItemId && item.catalogItemId === newItem.catalogItemId) ||
          (newItem.vendorAssetId && item.vendorAssetId === newItem.vendorAssetId) ||
@@ -95,8 +107,8 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     let updated: CartItem[];
     if (existingIndex >= 0) {
-      updated = [...cartItems];
-      const existing = cartItems[existingIndex];
+      updated = [...currentItems];
+      const existing = currentItems[existingIndex];
       const combinedQty = existing.quantity + newItem.quantity;
       updated[existingIndex] = {
         ...newItem,
@@ -111,10 +123,37 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
         id: `cart_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
         addedAt: new Date().toISOString(),
       };
-      updated = [...cartItems, item];
+      updated = [...currentItems, item];
     }
     saveCart(updated);
     setIsCartOpen(true);
+  };
+
+  const addToCart = (newItem: Omit<CartItem, 'id' | 'addedAt'>, forceReplace = false) => {
+    // Phase 4 Single-Vendor Cart Policy Enforcement:
+    // If cart already has items and the new item has a different vendor, prompt user
+    if (!forceReplace && cartItems.length > 0 && newItem.vendorId) {
+      const currentVendorItem = cartItems.find((it) => it.vendorId && it.vendorId !== newItem.vendorId);
+      if (currentVendorItem) {
+        setPendingVendorConflict({
+          newItem,
+          currentVendorName: currentVendorItem.vendorName || currentVendorItem.vendorBrandName || 'Existing Vendor',
+          newVendorName: newItem.vendorName || newItem.vendorBrandName || 'New Vendor',
+          currentVendorId: currentVendorItem.vendorId || '',
+          newVendorId: newItem.vendorId,
+        });
+        return;
+      }
+    }
+
+    executeAdd(newItem, cartItems);
+  };
+
+  const resolveVendorConflict = (action: 'REPLACE' | 'CANCEL') => {
+    if (action === 'REPLACE' && pendingVendorConflict) {
+      executeAdd(pendingVendorConflict.newItem, []); // Clears previous vendor items and adds new item
+    }
+    setPendingVendorConflict(null);
   };
 
   const removeFromCart = (id: string) => {
@@ -159,7 +198,8 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
   const cartCount = cartItems.reduce((acc, item) => acc + item.quantity, 0);
   const cartSubtotal = cartItems.reduce((acc, item) => acc + (item.totalPrice || item.unitPrice * item.quantity), 0);
   const platformFee = cartItems.length > 0 ? 50 : 0;
-  const taxAmount = Math.round(cartSubtotal * 0.18);
+  // Tax is determined authoritatively by backend validation based on verified catalog tax attributes (no hardcoded 18% assumption)
+  const taxAmount = 0;
   const cartTotal = cartSubtotal + platformFee + taxAmount;
 
   return (
@@ -178,9 +218,12 @@ export const CartProvider: React.FC<{ children: React.ReactNode }> = ({ children
         platformFee,
         taxAmount,
         cartTotal,
+        pendingVendorConflict,
+        resolveVendorConflict,
       }}
     >
       {children}
+      <CartVendorConflictModal />
     </CartContext.Provider>
   );
 };

@@ -83,3 +83,58 @@ func TestOpportunityService_MOQ_Enforcement(t *testing.T) {
 		t.Errorf("FAIL: Model 2 order mode was incorrectly set to catalog!")
 	}
 }
+
+func TestOpportunityService_JourneyRegistration(t *testing.T) {
+	svc := NewOpportunityService(nil, nil, nil)
+	ctx := context.Background()
+	testUserID := uuid.New()
+
+	// Test 1: Missing origin address should fail
+	_, err := svc.RegisterJourney(ctx, testUserID, &domain.RegisterJourneyRequest{
+		OriginAddress:      "",
+		DestinationAddress: "Choutuppal, Telangana",
+	})
+	if err == nil || err.Error() != "origin address is required" {
+		t.Errorf("FAIL: Expected 'origin address is required', got: %v", err)
+	} else {
+		t.Logf("PASS: Correctly rejected journey with empty origin address: %v", err)
+	}
+
+	// Test 2: Invalid coordinates should fail
+	_, err = svc.RegisterJourney(ctx, testUserID, &domain.RegisterJourneyRequest{
+		OriginAddress:      "Lingotam",
+		DestinationAddress: "Choutuppal",
+		OriginLat:          95.0, // Invalid latitude (> 90)
+		OriginLng:          78.95,
+	})
+	if err == nil || err.Error() != "invalid origin coordinates" {
+		t.Errorf("FAIL: Expected 'invalid origin coordinates', got: %v", err)
+	} else {
+		t.Logf("PASS: Correctly rejected invalid latitude (95.0): %v", err)
+	}
+
+	// Test 3: Excessive detour limit should fail
+	_, err = svc.RegisterJourney(ctx, testUserID, &domain.RegisterJourneyRequest{
+		OriginAddress:      "Lingotam",
+		DestinationAddress: "Choutuppal",
+		OriginLat:          17.25,
+		OriginLng:          78.95,
+		DestinationLat:     17.30,
+		DestinationLng:     79.00,
+		MaxDetourKM:        75.0, // > 50km
+	})
+	if err == nil || err.Error() != "maximum acceptable detour cannot exceed 50 km" {
+		t.Errorf("FAIL: Expected 'maximum acceptable detour cannot exceed 50 km', got: %v", err)
+	} else {
+		t.Logf("PASS: Correctly rejected excessive detour limit (75km): %v", err)
+	}
+
+	// Test 4: Invalid status action should fail
+	err = svc.SetJourneyStatus(ctx, uuid.New(), testUserID, "INVALID_ACTION")
+	if err == nil {
+		t.Errorf("FAIL: Expected error for invalid status action, got nil")
+	} else {
+		t.Logf("PASS: Correctly rejected invalid action 'INVALID_ACTION': %v", err)
+	}
+}
+

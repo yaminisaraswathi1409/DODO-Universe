@@ -583,8 +583,8 @@ export default function CreateOpportunityModal({
                     <option value="">No categories available</option>
                   ) : (
                     uniqueCategories.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name}
+                      <option key={c.id} value={c.id} disabled={c.is_selectable === false}>
+                        {c.is_selectable === false ? `📁 ${c.name} (Grouping - Non-selectable)` : c.name}
                       </option>
                     ))
                   )}

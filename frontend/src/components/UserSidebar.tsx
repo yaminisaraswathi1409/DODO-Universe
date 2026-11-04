@@ -22,6 +22,7 @@ import {
   X,
   Zap,
   ShieldCheck,
+  Compass,
 } from 'lucide-react';
 
 interface UserSidebarProps {
@@ -104,6 +105,12 @@ export default function UserSidebar({ children }: UserSidebarProps) {
       href: '/dashboard?tab=services',
       icon: ShieldCheck,
       isActive: pathname === '/dashboard' && currentTab === 'services',
+    },
+    {
+      label: 'My Journeys',
+      href: '/dashboard?tab=journeys',
+      icon: Compass,
+      isActive: pathname === '/dashboard' && currentTab === 'journeys',
     },
     {
       label: 'Saved Addresses',

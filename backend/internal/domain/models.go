@@ -55,6 +55,7 @@ const (
 	StatusPendingMatching   OpportunityStatus = "PENDING_MATCHING"
 	StatusOpenNeed          OpportunityStatus = "OPEN_NEED"
 	StatusInProgress        OpportunityStatus = "IN_PROGRESS"
+	StatusPaused            OpportunityStatus = "PAUSED"
 )
 
 type UserStatus string
@@ -92,6 +93,10 @@ type User struct {
 	IsVerified          bool       `json:"is_verified"`
 	Status              UserStatus `json:"status"`
 	Role                UserRole   `json:"role"`
+	IsSuspended         bool       `json:"is_suspended"`
+	SuspensionReason    string     `json:"suspension_reason,omitempty"`
+	SuspendedAt         *time.Time `json:"suspended_at,omitempty"`
+	SuspendedBy         *uuid.UUID `json:"suspended_by,omitempty"`
 	MobileVerified      bool       `json:"mobile_verified"`
 	OTPCode             string     `json:"otp_code,omitempty"`
 	OTPExpiresAt        *time.Time `json:"otp_expires_at,omitempty"`
@@ -162,6 +167,7 @@ type OrderMode string
 const (
 	OrderModeCatalog OrderMode = "CATALOG_ORDER"
 	OrderModeGeneral OrderMode = "GENERAL_BROADCAST"
+	OrderModeJourney OrderMode = "JOURNEY"
 )
 
 // Category definition
@@ -172,6 +178,12 @@ type Category struct {
 	Description          string          `json:"description,omitempty"`
 	Icon                 string          `json:"icon,omitempty"`
 	DefaultWorkflow      WorkflowModel   `json:"default_workflow"`
+	ParentID             *uuid.UUID      `json:"parent_id,omitempty"`
+	Level                int             `json:"level"`
+	Path                 string          `json:"path"`
+	DisplayOrder         int             `json:"display_order"`
+	IsSelectable         bool            `json:"is_selectable"`
+	Children             []*Category     `json:"children,omitempty"`
 	RequiredDocuments    json.RawMessage `json:"required_documents,omitempty"`
 	OpportunityFields    json.RawMessage `json:"opportunity_fields,omitempty"`
 	VehicleFields        json.RawMessage `json:"vehicle_fields,omitempty"`
@@ -182,33 +194,155 @@ type Category struct {
 	CreatedAt            time.Time       `json:"created_at"`
 }
 
-// VendorCatalogItem represents a product or service offered in a vendor's catalog (1 Vendor -> MANY items)
-type VendorCatalogItem struct {
-	ID               uuid.UUID       `json:"id"`
-	VendorAssetID    *uuid.UUID      `json:"vendor_asset_id,omitempty"`
-	VendorAsset      *UserSkillAsset `json:"vendor_asset,omitempty"`
-	VendorUserID     uuid.UUID       `json:"vendor_user_id"`
-	VendorUser       *User           `json:"vendor_user,omitempty"`
-	CategoryID       *uuid.UUID      `json:"category_id,omitempty"`
-	Category         *Category       `json:"category,omitempty"`
-	Title            string          `json:"title"`
-	Description      string          `json:"description,omitempty"`
-	SKU              string          `json:"sku,omitempty"`
-	UnitPrice        float64         `json:"unit_price"`
-	PriceUnit        string          `json:"price_unit"`
-	StockQuantity    int             `json:"stock_quantity"`
-	MinOrderQuantity int             `json:"min_order_quantity"`
-	Images           json.RawMessage `json:"images,omitempty"`
-	Attributes       json.RawMessage `json:"attributes,omitempty"`
-	Status           string          `json:"status,omitempty"`
-	RejectionReason  string          `json:"rejection_reason,omitempty"`
-	PickupLat        float64         `json:"pickup_lat,omitempty"`
-	PickupLng        float64         `json:"pickup_lng,omitempty"`
-	PickupAddress    string          `json:"pickup_address,omitempty"`
-	IsAvailable      bool            `json:"is_available"`
-	CreatedAt        time.Time       `json:"created_at"`
-	UpdatedAt        time.Time       `json:"updated_at"`
+type VendorCategoryApprovalStatus string
+
+const (
+	CategoryApprovalPending          VendorCategoryApprovalStatus = "PENDING_APPROVAL"
+	CategoryApprovalChangesRequested VendorCategoryApprovalStatus = "CHANGES_REQUESTED"
+	CategoryApprovalActive           VendorCategoryApprovalStatus = "ACTIVE"
+	CategoryApprovalRejected         VendorCategoryApprovalStatus = "REJECTED"
+	CategoryApprovalSuspended        VendorCategoryApprovalStatus = "SUSPENDED"
+)
+
+type ApprovalHistoryEntry struct {
+	Action    string    `json:"action"`
+	ActorID   uuid.UUID `json:"actor_id"`
+	ActorRole string    `json:"actor_role"`
+	Notes     string    `json:"notes,omitempty"`
+	Timestamp time.Time `json:"timestamp"`
 }
+
+type VendorCategoryApproval struct {
+	ID                 uuid.UUID                    `json:"id"`
+	VendorID           uuid.UUID                    `json:"vendor_id"`
+	Vendor             *User                        `json:"vendor,omitempty"`
+	CategoryID         uuid.UUID                    `json:"category_id"`
+	Category           *Category                    `json:"category,omitempty"`
+	Status             VendorCategoryApprovalStatus `json:"status"`
+	AssetID            uuid.UUID                    `json:"asset_id"`
+	CanonicalAsset     *UserSkillAsset              `json:"canonical_asset,omitempty"`
+	SecondaryAssetIDs  []uuid.UUID                  `json:"secondary_asset_ids"`
+	SecondaryAssets    []*UserSkillAsset            `json:"secondary_assets,omitempty"`
+	RejectionReason    string                       `json:"rejection_reason,omitempty"`
+	ChangeRequestNotes string                       `json:"change_request_notes,omitempty"`
+	History            []ApprovalHistoryEntry       `json:"history"`
+	ApprovedBy         *uuid.UUID                   `json:"approved_by,omitempty"`
+	ApprovedAt         *time.Time                   `json:"approved_at,omitempty"`
+	CreatedAt          time.Time                    `json:"created_at"`
+	UpdatedAt          time.Time                    `json:"updated_at"`
+}
+
+// VendorCatalogItem represents a product, service offering, or grouping node in a vendor's catalog
+type VendorCatalogItem struct {
+	ID                 uuid.UUID            `json:"id"`
+	VendorAssetID      *uuid.UUID           `json:"vendor_asset_id,omitempty"`
+	VendorAsset        *UserSkillAsset      `json:"vendor_asset,omitempty"`
+	VendorUserID       uuid.UUID            `json:"vendor_user_id"`
+	VendorUser         *User                `json:"vendor_user,omitempty"`
+	CategoryID         *uuid.UUID           `json:"category_id,omitempty"`
+	Category           *Category            `json:"category,omitempty"`
+	ParentID           *uuid.UUID           `json:"parent_id,omitempty"`
+	NodeType           string               `json:"node_type"` // GROUPING or BOOKABLE
+	Level              int                  `json:"level"`
+	Path               string               `json:"path"`
+	DisplayOrder       int                  `json:"display_order"`
+	Title              string               `json:"title"`
+	Description        string               `json:"description,omitempty"`
+	SKU                string               `json:"sku,omitempty"`
+	PriceType          string               `json:"price_type"` // FIXED or QUOTATION
+	UnitPrice          float64              `json:"unit_price"`
+	PriceUnit          string               `json:"price_unit"`
+	StockQuantity      int                  `json:"stock_quantity"`
+	MinOrderQuantity   int                  `json:"min_order_quantity"`
+	Images             json.RawMessage      `json:"images,omitempty"`
+	Attributes         json.RawMessage      `json:"attributes,omitempty"`
+	IncludedServices   json.RawMessage      `json:"included_services,omitempty"`
+	OptionalServices   json.RawMessage      `json:"optional_services,omitempty"`
+	FulfilmentInfo     json.RawMessage      `json:"fulfilment_info,omitempty"`
+	Status             string               `json:"status,omitempty"`
+	ChangeRequestNotes string               `json:"change_request_notes,omitempty"`
+	RejectionReason    string               `json:"rejection_reason,omitempty"`
+	ReviewHistory      json.RawMessage      `json:"review_history,omitempty"`
+	PickupLat          float64              `json:"pickup_lat,omitempty"`
+	PickupLng          float64              `json:"pickup_lng,omitempty"`
+	PickupAddress      string               `json:"pickup_address,omitempty"`
+	IsAvailable        bool                 `json:"is_available"`
+	CreatedAt          time.Time            `json:"created_at"`
+	UpdatedAt          time.Time            `json:"updated_at"`
+	Children           []*VendorCatalogItem `json:"children,omitempty"`
+}
+
+type CatalogReviewEntry struct {
+	Timestamp    time.Time  `json:"timestamp"`
+	Action       string     `json:"action"` // APPROVED, CHANGES_REQUESTED, REJECTED
+	ReviewerID   *uuid.UUID `json:"reviewer_id,omitempty"`
+	ReviewerName string     `json:"reviewer_name,omitempty"`
+	Notes        string     `json:"notes,omitempty"`
+}
+
+type AdditionalServiceItem struct {
+	ID          string  `json:"id"`
+	Name        string  `json:"name"`
+	Description string  `json:"description,omitempty"`
+	IsIncluded  bool    `json:"is_included"`
+	Price       float64 `json:"price,omitempty"`
+	PriceUnit   string  `json:"price_unit,omitempty"`
+	IsAvailable bool    `json:"is_available"`
+}
+
+// Phase 4: Customer Marketplace Models
+type CatalogBreadcrumb struct {
+	ID       uuid.UUID `json:"id"`
+	Title    string    `json:"title"`
+	NodeType string    `json:"node_type"`
+	Level    int       `json:"level"`
+}
+
+type MarketplaceCatalogFilter struct {
+	Query        string     `json:"query,omitempty"`
+	CategorySlug string     `json:"category_slug,omitempty"`
+	CategoryID   *uuid.UUID `json:"category_id,omitempty"`
+	VendorID     *uuid.UUID `json:"vendor_id,omitempty"`
+	MinPrice     *float64   `json:"min_price,omitempty"`
+	MaxPrice     *float64   `json:"max_price,omitempty"`
+	PriceType    string     `json:"price_type,omitempty"` // FIXED, QUOTATION
+	InStockOnly  bool       `json:"in_stock_only,omitempty"`
+	CustomerLat  float64    `json:"customer_lat,omitempty"`
+	CustomerLng  float64    `json:"customer_lng,omitempty"`
+	RadiusKM     float64    `json:"radius_km,omitempty"`
+	SortBy       string     `json:"sort_by,omitempty"` // relevance, price_asc, price_desc, newest, distance, trust_score
+	Limit        int        `json:"limit,omitempty"`
+	Offset       int        `json:"offset,omitempty"`
+}
+
+type MarketplaceVendorCard struct {
+	VendorID        uuid.UUID            `json:"vendor_id"`
+	VendorName      string               `json:"vendor_name"`
+	VendorPhone     string               `json:"vendor_phone,omitempty"`
+	VendorAvatar    string               `json:"vendor_avatar,omitempty"`
+	TrustScore      float64              `json:"trust_score"`
+	IsVerified      bool                 `json:"is_verified"`
+	AddressText     string               `json:"address_text,omitempty"`
+	Lat             float64              `json:"lat,omitempty"`
+	Lng             float64              `json:"lng,omitempty"`
+	DistanceKM      *float64             `json:"distance_km,omitempty"`
+	CategoryName    string               `json:"category_name,omitempty"`
+	CategorySlug    string               `json:"category_slug,omitempty"`
+	OfferingCount   int                  `json:"offering_count"`
+	MinPrice        float64              `json:"min_price,omitempty"`
+	MaxPrice        float64              `json:"max_price,omitempty"`
+	PriceUnit       string               `json:"price_unit,omitempty"`
+	SampleOfferings []*VendorCatalogItem `json:"sample_offerings,omitempty"`
+}
+
+type OfferingComparisonResponse struct {
+	Items         []*VendorCatalogItem `json:"items"`
+	CommonSpecs   []string             `json:"common_specs"`
+	AllSpecKeys   []string             `json:"all_spec_keys"`
+	PriceUnits    []string             `json:"price_units"`
+	HasMixedUnits bool                 `json:"has_mixed_units"`
+}
+
 
 // Opportunity (Represents a Need or Offer)
 type Opportunity struct {
@@ -286,17 +420,100 @@ type DynamicResource struct {
 
 // CommuteRouteMetadata (Scenario 2 Daily Commuter Route attributes)
 type CommuteRouteMetadata struct {
-	OriginAddress      string   `json:"origin_address"`
-	OriginLat          float64  `json:"origin_lat"`
-	OriginLng          float64  `json:"origin_lng"`
-	DestinationAddress string   `json:"destination_address"`
-	DestinationLat     float64  `json:"destination_lat"`
-	DestinationLng     float64  `json:"destination_lng"`
-	TravelFrequency    string   `json:"travel_frequency"` // 'DAILY', 'WEEKDAYS', 'WEEKENDS'
-	AvailableDays      []string `json:"available_days,omitempty"`
-	TravelTime         string   `json:"travel_time,omitempty"`
-	TravelMode         string   `json:"travel_mode,omitempty"` // 'BIKE', 'AUTO', 'CAR', 'TRACTOR'
-	IsActive           bool     `json:"is_active"`
+	OriginAddress        string   `json:"origin_address"`
+	OriginLat            float64  `json:"origin_lat"`
+	OriginLng            float64  `json:"origin_lng"`
+	DestinationAddress   string   `json:"destination_address"`
+	DestinationLat       float64  `json:"destination_lat"`
+	DestinationLng       float64  `json:"destination_lng"`
+	TravelFrequency      string   `json:"travel_frequency"` // 'ONE_TIME', 'DAILY', 'WEEKDAYS', 'WEEKENDS', 'CUSTOM'
+	JourneyType          string   `json:"journey_type"`      // 'ONE_TIME', 'RECURRING'
+	AvailableDays        []string `json:"available_days,omitempty"`
+	TravelTime           string   `json:"travel_time,omitempty"`
+	DepartureWindowStart string   `json:"departure_window_start,omitempty"`
+	DepartureWindowEnd   string   `json:"departure_window_end,omitempty"`
+	ArrivalWindowStart   string   `json:"arrival_window_start,omitempty"`
+	ArrivalWindowEnd     string   `json:"arrival_window_end,omitempty"`
+	TravelMode           string   `json:"travel_mode,omitempty"` // 'BIKE', 'SCOOTER', 'CAR', 'AUTO', 'BUS', 'WALK', 'OTHER'
+	MaxDetourKM          float64  `json:"max_detour_km,omitempty"`
+	MaxDetourMinutes     int      `json:"max_detour_minutes,omitempty"`
+	IsActive             bool     `json:"is_active"`
+	IsJourney            bool     `json:"is_journey"`
+}
+
+// UserJourney represents a registered travel route (backed cleanly by opportunities table)
+type UserJourney struct {
+	ID                   uuid.UUID `json:"id"`
+	UserID               uuid.UUID `json:"user_id"`
+	User                 *User     `json:"user,omitempty"`
+	Title                string    `json:"title"`
+	Description          string    `json:"description,omitempty"`
+	Status               string    `json:"status"` // 'OPEN' (Active), 'PAUSED', 'CANCELLED', 'COMPLETED'
+	OriginAddress        string    `json:"origin_address"`
+	OriginLat            float64   `json:"origin_lat"`
+	OriginLng            float64   `json:"origin_lng"`
+	DestinationAddress   string    `json:"destination_address"`
+	DestinationLat       float64   `json:"destination_lat"`
+	DestinationLng       float64   `json:"destination_lng"`
+	TravelMode           string    `json:"travel_mode"`
+	JourneyType          string    `json:"journey_type"`
+	TravelFrequency      string    `json:"travel_frequency"`
+	AvailableDays        []string  `json:"available_days,omitempty"`
+	DepartureWindowStart string    `json:"departure_window_start,omitempty"`
+	DepartureWindowEnd   string    `json:"departure_window_end,omitempty"`
+	ArrivalWindowStart   string    `json:"arrival_window_start,omitempty"`
+	ArrivalWindowEnd     string    `json:"arrival_window_end,omitempty"`
+	MaxDetourKM          float64   `json:"max_detour_km"`
+	MaxDetourMinutes     int       `json:"max_detour_minutes"`
+	IsActive             bool      `json:"is_active"`
+	CreatedAt            time.Time `json:"created_at"`
+	UpdatedAt            time.Time `json:"updated_at"`
+}
+
+// RegisterJourneyRequest payload
+type RegisterJourneyRequest struct {
+	UserID               string   `json:"user_id,omitempty"`
+	OriginAddress        string   `json:"origin_address"`
+	OriginLat            float64  `json:"origin_lat"`
+	OriginLng            float64  `json:"origin_lng"`
+	DestinationAddress   string   `json:"destination_address"`
+	DestinationLat       float64  `json:"destination_lat"`
+	DestinationLng       float64  `json:"destination_lng"`
+	TravelMode           string   `json:"travel_mode"`
+	JourneyType          string   `json:"journey_type"`      // 'ONE_TIME', 'RECURRING'
+	TravelFrequency      string   `json:"travel_frequency"` // 'ONE_TIME', 'DAILY', 'WEEKDAYS', 'WEEKENDS', 'CUSTOM'
+	AvailableDays        []string `json:"available_days,omitempty"`
+	DepartureWindowStart string   `json:"departure_window_start,omitempty"`
+	DepartureWindowEnd   string   `json:"departure_window_end,omitempty"`
+	ArrivalWindowStart   string   `json:"arrival_window_start,omitempty"`
+	ArrivalWindowEnd     string   `json:"arrival_window_end,omitempty"`
+	MaxDetourKM          float64  `json:"max_detour_km,omitempty"`
+	MaxDetourMinutes     int      `json:"max_detour_minutes,omitempty"`
+}
+
+// UpdateJourneyRequest payload
+type UpdateJourneyRequest struct {
+	OriginAddress        string   `json:"origin_address,omitempty"`
+	OriginLat            float64  `json:"origin_lat,omitempty"`
+	OriginLng            float64  `json:"origin_lng,omitempty"`
+	DestinationAddress   string   `json:"destination_address,omitempty"`
+	DestinationLat       float64  `json:"destination_lat,omitempty"`
+	DestinationLng       float64  `json:"destination_lng,omitempty"`
+	TravelMode           string   `json:"travel_mode,omitempty"`
+	JourneyType          string   `json:"journey_type,omitempty"`
+	TravelFrequency      string   `json:"travel_frequency,omitempty"`
+	AvailableDays        []string `json:"available_days,omitempty"`
+	DepartureWindowStart string   `json:"departure_window_start,omitempty"`
+	DepartureWindowEnd   string   `json:"departure_window_end,omitempty"`
+	ArrivalWindowStart   string   `json:"arrival_window_start,omitempty"`
+	ArrivalWindowEnd     string   `json:"arrival_window_end,omitempty"`
+	MaxDetourKM          float64  `json:"max_detour_km,omitempty"`
+	MaxDetourMinutes     int      `json:"max_detour_minutes,omitempty"`
+}
+
+// UpdateJourneyStatusRequest payload
+type UpdateJourneyStatusRequest struct {
+	Action string `json:"action"` // 'PAUSE', 'RESUME', 'CANCEL'
 }
 
 // CommuteMatchResult (PostGIS Spatial Commute Route Match output)
@@ -363,37 +580,54 @@ type TrustRating struct {
 
 // VehicleDriverPairing (Assigning driver to vehicle asset)
 type VehicleDriverPairing struct {
-	ID            uuid.UUID       `json:"id"`
-	VehicleID     uuid.UUID       `json:"vehicle_id"`
-	Vehicle       *UserSkillAsset `json:"vehicle,omitempty"`
-	DriverID      uuid.UUID       `json:"driver_id"`
-	Driver        *User           `json:"driver,omitempty"`
-	LicenseNumber string          `json:"license_number,omitempty"`
-	LicenseClass  string          `json:"license_class,omitempty"`
-	Status        string          `json:"status"` // ACTIVE, OFF_DUTY, SUSPENDED
-	AssignedAt    time.Time       `json:"assigned_at"`
-	CreatedAt     time.Time       `json:"created_at"`
-	UpdatedAt     time.Time       `json:"updated_at"`
+	ID                 uuid.UUID       `json:"id"`
+	VehicleID          uuid.UUID       `json:"vehicle_id"`
+	Vehicle            *UserSkillAsset `json:"vehicle,omitempty"`
+	DriverID           uuid.UUID       `json:"driver_id"`
+	Driver             *User           `json:"driver,omitempty"`
+	LicenseNumber      string          `json:"license_number,omitempty"`
+	LicenseClass       string          `json:"license_class,omitempty"`
+	Status             string          `json:"status"` // ACTIVE, OFF_DUTY, SUSPENDED
+	OpportunityID      *uuid.UUID      `json:"opportunity_id,omitempty"`
+	ManifestID         *uuid.UUID      `json:"manifest_id,omitempty"`
+	Metadata           json.RawMessage `json:"metadata,omitempty"`
+	AssignedAt         time.Time       `json:"assigned_at"`
+	CreatedAt          time.Time       `json:"created_at"`
+	UpdatedAt          time.Time       `json:"updated_at"`
 }
 
 // WayManifest (Digital Way Manifest, routing barcode, Proof of Loading & Delivery)
 type WayManifest struct {
-	ID             uuid.UUID       `json:"id"`
-	OpportunityID  uuid.UUID       `json:"opportunity_id"`
-	VehicleID      *uuid.UUID      `json:"vehicle_id,omitempty"`
-	Vehicle        *UserSkillAsset `json:"vehicle,omitempty"`
-	DriverID       *uuid.UUID      `json:"driver_id,omitempty"`
-	Driver         *User           `json:"driver,omitempty"`
-	ManifestNumber string          `json:"manifest_number"`
-	RoutingBarcode string          `json:"routing_barcode"`
-	POLPhotoURL    string          `json:"pol_photo_url,omitempty"`
-	POLCapturedAt  *time.Time      `json:"pol_captured_at,omitempty"`
-	PODQRCode      string          `json:"pod_qr_code,omitempty"`
-	PODSignature   string          `json:"pod_signature_url,omitempty"`
-	PODCapturedAt  *time.Time      `json:"pod_captured_at,omitempty"`
-	Status         string          `json:"status"` // GENERATED, LOADED, IN_TRANSIT, DELIVERED
-	CreatedAt      time.Time       `json:"created_at"`
-	UpdatedAt      time.Time       `json:"updated_at"`
+	ID                  uuid.UUID       `json:"id"`
+	OpportunityID       uuid.UUID       `json:"opportunity_id"`
+	VehicleID           *uuid.UUID      `json:"vehicle_id,omitempty"`
+	Vehicle             *UserSkillAsset `json:"vehicle,omitempty"`
+	DriverID            *uuid.UUID      `json:"driver_id,omitempty"`
+	Driver              *User           `json:"driver,omitempty"`
+	VendorID            *uuid.UUID      `json:"vendor_id,omitempty"`
+	Vendor              *User           `json:"vendor,omitempty"`
+	TransportProviderID *uuid.UUID      `json:"transport_provider_id,omitempty"`
+	TransportProvider   *User           `json:"transport_provider,omitempty"`
+	ManifestNumber      string          `json:"manifest_number"`
+	RoutingBarcode      string          `json:"routing_barcode"`
+	PickupAddress       string          `json:"pickup_address,omitempty"`
+	DeliveryAddress     string          `json:"delivery_address,omitempty"`
+	CargoDescription    string          `json:"cargo_description,omitempty"`
+	CargoQuantity       float64         `json:"cargo_quantity,omitempty"`
+	CargoUnit           string          `json:"cargo_unit,omitempty"`
+	ExpectedPickupAt    *time.Time      `json:"expected_pickup_at,omitempty"`
+	ExpectedDeliveryAt  *time.Time      `json:"expected_delivery_at,omitempty"`
+	POLPhotoURL         string          `json:"pol_photo_url,omitempty"`
+	POLCapturedAt       *time.Time      `json:"pol_captured_at,omitempty"`
+	POLData             json.RawMessage `json:"pol_data,omitempty"`
+	PODQRCode           string          `json:"pod_qr_code,omitempty"`
+	PODSignature        string          `json:"pod_signature_url,omitempty"`
+	PODCapturedAt       *time.Time      `json:"pod_captured_at,omitempty"`
+	PODData             json.RawMessage `json:"pod_data,omitempty"`
+	Metadata            json.RawMessage `json:"metadata,omitempty"`
+	Status              string          `json:"status"` // GENERATED, LOADED, IN_TRANSIT, DELIVERED
+	CreatedAt           time.Time       `json:"created_at"`
+	UpdatedAt           time.Time       `json:"updated_at"`
 }
 
 // IncidentTelemetry (SOS Breakdown & Telemetry alert tracking)
@@ -584,3 +818,120 @@ type PriceSnapshot struct {
 	CalculatedAt    time.Time            `json:"calculated_at"`
 }
 
+
+
+// ============================================================================
+// PHASE 5: CART, CHECKOUT, PRICING & INVENTORY MANAGEMENT MODELS
+// ============================================================================
+
+type ReservationStatus string
+const (
+	ReservationReserved  ReservationStatus = "RESERVED"
+	ReservationCommitted ReservationStatus = "COMMITTED"
+	ReservationReleased  ReservationStatus = "RELEASED"
+	ReservationExpired   ReservationStatus = "EXPIRED"
+)
+
+type InventoryReservation struct {
+	ID             uuid.UUID         `json:"id"`
+	CatalogItemID  uuid.UUID         `json:"catalog_item_id"`
+	OpportunityID  *uuid.UUID        `json:"opportunity_id,omitempty"`
+	UserID         uuid.UUID         `json:"user_id"`
+	Quantity       int               `json:"quantity"`
+	Status         ReservationStatus `json:"status"`
+	IdempotencyKey string            `json:"idempotency_key,omitempty"`
+	ExpiresAt      time.Time         `json:"expires_at"`
+	CreatedAt      time.Time         `json:"created_at"`
+	UpdatedAt      time.Time         `json:"updated_at"`
+}
+
+type PaymentStatus string
+const (
+	PaymentPending  PaymentStatus = "PENDING"
+	PaymentSuccess  PaymentStatus = "SUCCESS"
+	PaymentFailed   PaymentStatus = "FAILED"
+	PaymentExpired  PaymentStatus = "EXPIRED"
+	PaymentRefunded PaymentStatus = "REFUNDED"
+)
+
+type PaymentTransaction struct {
+	ID                uuid.UUID       `json:"id"`
+	OpportunityID     uuid.UUID       `json:"opportunity_id"`
+	UserID            uuid.UUID       `json:"user_id"`
+	Amount            float64         `json:"amount"`
+	Currency          string          `json:"currency"`
+	PaymentMethod     string          `json:"payment_method"`
+	PaymentReference  string          `json:"payment_reference"`
+	Status            PaymentStatus   `json:"status"`
+	CallbackSignature string          `json:"callback_signature,omitempty"`
+	CallbackPayload   json.RawMessage `json:"callback_payload,omitempty"`
+	CreatedAt         time.Time       `json:"created_at"`
+	UpdatedAt         time.Time       `json:"updated_at"`
+}
+
+type CartValidationItem struct {
+	CatalogItemID            uuid.UUID `json:"catalog_item_id"`
+	Quantity                 int       `json:"quantity"`
+	SelectedOptionalServices []string  `json:"selected_optional_services,omitempty"`
+}
+
+type CartValidationRequest struct {
+	Items       []CartValidationItem `json:"items"`
+	DeliveryLat float64              `json:"delivery_lat,omitempty"`
+	DeliveryLng float64              `json:"delivery_lng,omitempty"`
+	AddressText string               `json:"address_text,omitempty"`
+}
+
+type CartItemPriceBreakdown struct {
+	CatalogItemID            uuid.UUID                `json:"catalog_item_id"`
+	Title                    string                   `json:"title"`
+	VendorUserID             uuid.UUID                `json:"vendor_user_id"`
+	VendorName               string                   `json:"vendor_name"`
+	Quantity                 int                      `json:"quantity"`
+	PriceUnit                string                   `json:"price_unit"`
+	UnitPrice                float64                  `json:"unit_price"`
+	ProductSubtotal          float64                  `json:"product_subtotal"`
+	SelectedOptionalServices []AdditionalServiceItem `json:"selected_optional_services,omitempty"`
+	OptionalServicesSubtotal float64                  `json:"optional_services_subtotal"`
+	MinOrderQuantity         int                      `json:"min_order_quantity"`
+	AvailableStock           int                      `json:"available_stock"`
+}
+
+type CartValidationResponse struct {
+	IsValid                  bool                     `json:"is_valid"`
+	RejectionReason          string                   `json:"rejection_reason,omitempty"`
+	VendorUserID             uuid.UUID                `json:"vendor_user_id"`
+	VendorName               string                   `json:"vendor_name"`
+	Items                    []CartItemPriceBreakdown `json:"items"`
+	ProductSubtotal          float64                  `json:"product_subtotal"`
+	OptionalServicesSubtotal float64                  `json:"optional_services_subtotal"`
+	DeliveryCharge           float64                  `json:"delivery_charge"`
+	PlatformFee              float64                  `json:"platform_fee"`
+	TaxAmount                float64                  `json:"tax_amount"`
+	FinalPayable             float64                  `json:"final_payable"`
+	PriceSnapshot            *PriceSnapshot           `json:"price_snapshot,omitempty"`
+}
+
+type InitiateCheckoutRequest struct {
+	CartValidationRequest
+	IdempotencyKey string `json:"idempotency_key,omitempty"`
+	PaymentMethod  string `json:"payment_method,omitempty"`
+}
+
+type InitiateCheckoutResponse struct {
+	OpportunityID      uuid.UUID               `json:"opportunity_id"`
+	PaymentReference   string                  `json:"payment_reference"`
+	PaymentSignature   string                  `json:"payment_signature"`
+	Amount             float64                 `json:"amount"`
+	Currency           string                  `json:"currency"`
+	ReservationExpires time.Time               `json:"reservation_expires"`
+	Validation         *CartValidationResponse `json:"validation"`
+}
+
+type PaymentCallbackRequest struct {
+	PaymentReference string `json:"payment_reference"`
+	Signature        string `json:"signature"`
+	Status           string `json:"status"` // SUCCESS, FAILED
+	GatewayTxnID     string `json:"gateway_txn_id,omitempty"`
+	FailureReason    string `json:"failure_reason,omitempty"`
+}

@@ -2,8 +2,11 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
+	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
@@ -26,10 +29,19 @@ func NewCatalogHandler(catalogService *service.CatalogService, userRepo *postgre
 	}
 }
 
-// SearchCatalog handles GET /api/v1/catalog/search
+// SearchCatalog handles GET /api/v1/catalog/search with multi-criteria filtering
 func (h *CatalogHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query().Get("q")
 	categorySlug := r.URL.Query().Get("category")
+	vendorIDStr := r.URL.Query().Get("vendor_id")
+	priceType := r.URL.Query().Get("price_type")
+	inStockStr := r.URL.Query().Get("in_stock")
+	sortBy := r.URL.Query().Get("sort_by")
+	minPriceStr := r.URL.Query().Get("min_price")
+	maxPriceStr := r.URL.Query().Get("max_price")
+	latStr := r.URL.Query().Get("lat")
+	lngStr := r.URL.Query().Get("lng")
+	radiusStr := r.URL.Query().Get("radius_km")
 	pageStr := r.URL.Query().Get("page")
 	limitStr := r.URL.Query().Get("limit")
 
@@ -40,14 +52,61 @@ func (h *CatalogHandler) SearchCatalog(w http.ResponseWriter, r *http.Request) {
 
 	limit, _ := strconv.Atoi(limitStr)
 	if limit < 1 || limit > 100 {
-		limit = 50
+		limit = 24
 	}
 	offset := (page - 1) * limit
 
-	items, total, err := h.catalogService.SearchCatalogItems(r.Context(), q, categorySlug, limit, offset)
+	var filter domain.MarketplaceCatalogFilter
+	filter.Query = q
+	filter.CategorySlug = categorySlug
+	filter.PriceType = priceType
+	filter.SortBy = sortBy
+	filter.Limit = limit
+	filter.Offset = offset
+
+	if vendorIDStr != "" {
+		if vID, err := uuid.Parse(vendorIDStr); err == nil {
+			filter.VendorID = &vID
+		}
+	}
+	if categoryIDStr := r.URL.Query().Get("category_id"); categoryIDStr != "" {
+		if cID, err := uuid.Parse(categoryIDStr); err == nil {
+			filter.CategoryID = &cID
+		}
+	}
+	if minPriceStr != "" {
+		if mp, err := strconv.ParseFloat(minPriceStr, 64); err == nil {
+			filter.MinPrice = &mp
+		}
+	}
+	if maxPriceStr != "" {
+		if xp, err := strconv.ParseFloat(maxPriceStr, 64); err == nil {
+			filter.MaxPrice = &xp
+		}
+	}
+	if inStockStr == "true" || inStockStr == "1" {
+		filter.InStockOnly = true
+	}
+	if latStr != "" && lngStr != "" {
+		lat, _ := strconv.ParseFloat(latStr, 64)
+		lng, _ := strconv.ParseFloat(lngStr, 64)
+		rad, _ := strconv.ParseFloat(radiusStr, 64)
+		if rad <= 0 {
+			rad = 50.0 // Default 50km radius
+		}
+		filter.CustomerLat = lat
+		filter.CustomerLng = lng
+		filter.RadiusKM = rad
+	}
+
+	items, total, err := h.catalogService.SearchMarketplaceCatalog(r.Context(), filter)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to search catalog items", err.Error())
-		return
+		// Graceful fallback to standard search
+		items, total, err = h.catalogService.SearchCatalogItems(r.Context(), q, categorySlug, limit, offset)
+		if err != nil {
+			response.Error(w, http.StatusInternalServerError, "Failed to search catalog items", err.Error())
+			return
+		}
 	}
 
 	response.JSON(w, http.StatusOK, "Catalog items retrieved", map[string]interface{}{
@@ -88,12 +147,47 @@ func (h *CatalogHandler) GetVendorCatalog(w http.ResponseWriter, r *http.Request
 	})
 }
 
+// GetVendorCatalogTree handles GET /api/v1/vendors/{vendor_id}/catalog/tree
+func (h *CatalogHandler) GetVendorCatalogTree(w http.ResponseWriter, r *http.Request) {
+	vendorIDStr := chi.URLParam(r, "vendor_id")
+	vendorID, err := uuid.Parse(vendorIDStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid vendor_id format", err.Error())
+		return
+	}
+
+	var categoryID *uuid.UUID
+	catIDStr := r.URL.Query().Get("category_id")
+	if catIDStr != "" {
+		if cID, parseErr := uuid.Parse(catIDStr); parseErr == nil {
+			categoryID = &cID
+		}
+	}
+
+	includeUnapproved := r.URL.Query().Get("include_unapproved") == "true" || r.URL.Query().Get("all") == "true"
+
+	tree, err := h.catalogService.GetVendorCatalogTree(r.Context(), vendorID, categoryID, includeUnapproved)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to build vendor catalog tree", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Vendor catalog tree retrieved", map[string]interface{}{
+		"vendor_id": vendorID,
+		"tree":      tree,
+	})
+}
+
 // CreateCatalogItem handles POST /api/v1/vendor/catalog and POST /api/v1/services/create
 func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Request) {
 	var payload struct {
 		VendorUserID     string                 `json:"vendor_user_id"`
 		VendorAssetID    *string                `json:"vendor_asset_id"`
 		CategoryID       *string                `json:"category_id"`
+		ParentID         *string                `json:"parent_id"`
+		NodeType         string                 `json:"node_type"` // GROUPING or BOOKABLE
+		PriceType        string                 `json:"price_type"` // FIXED or QUOTATION
+		DisplayOrder     int                    `json:"display_order"`
 		CategoryCode     string                 `json:"category_code"`
 		SubCategory      string                 `json:"sub_category"`
 		Title            string                 `json:"title"`
@@ -106,6 +200,10 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		MOQUnits         int                    `json:"moq_units"`
 		Images           json.RawMessage        `json:"images"`
 		Attributes       json.RawMessage        `json:"attributes"`
+		IncludedServices json.RawMessage        `json:"included_services"`
+		OptionalServices json.RawMessage        `json:"optional_services"`
+		FulfilmentInfo   json.RawMessage        `json:"fulfilment_info"`
+		Status           string                 `json:"status"` // DRAFT or PENDING_ADMIN_APPROVAL
 		Metadata         map[string]interface{} `json:"metadata"`
 		PickupLocation   *struct {
 			Latitude    float64 `json:"latitude"`
@@ -136,9 +234,13 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		}
 	}
 	if vendorUser == nil {
-		users, err := h.userRepo.ListUsers(r.Context())
-		if err == nil && len(users) > 0 {
-			vendorUser = users[0]
+		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+		appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+		if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
+			users, err := h.userRepo.ListUsers(r.Context())
+			if err == nil && len(users) > 0 {
+				vendorUser = users[0]
+			}
 		}
 	}
 
@@ -147,32 +249,15 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Stage 3 Prerequisite Enforcement: Vendor can only create sub-services if parent main service details are APPROVED / ACTIVE
-	userAssets, _ := h.userRepo.GetActiveUserSkillsAssets(r.Context(), vendorUser.ID)
-	if len(userAssets) > 0 {
-		var parentApproved bool
-		for _, asset := range userAssets {
-			if asset.Status == domain.ServiceStatusActive || asset.Status == domain.ServiceStatusApproved {
-				if payload.VendorAssetID != nil && *payload.VendorAssetID != "" {
-					if asset.ID.String() == *payload.VendorAssetID {
-						parentApproved = true
-						break
-					}
-				} else if payload.CategoryID != nil && *payload.CategoryID != "" && asset.CategoryID != nil {
-					if asset.CategoryID.String() == *payload.CategoryID {
-						parentApproved = true
-						break
-					}
-				} else {
-					parentApproved = true
-					break
-				}
-			}
-		}
-		if !parentApproved {
-			response.Error(w, http.StatusBadRequest, "Cannot create sub-service offering: Parent main service details must be approved by Admin first (Stage 2)", nil)
-			return
-		}
+	// Node type resolution
+	nodeType := strings.ToUpper(strings.TrimSpace(payload.NodeType))
+	if nodeType == "" {
+		nodeType = "BOOKABLE"
+	}
+
+	priceType := strings.ToUpper(strings.TrimSpace(payload.PriceType))
+	if priceType == "" {
+		priceType = "FIXED"
 	}
 
 	// Merge attributes & metadata
@@ -186,30 +271,34 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
-	// Extract unit price & MOQ from Section 6 payload if present
+	// Unit price & MOQ resolution
 	unitPriceVal := payload.UnitPrice
-	if unitPriceVal <= 0 && payload.Metadata != nil {
-		if pm, ok := payload.Metadata["pricing_matrix"].(map[string]interface{}); ok {
-			if baseRate, bOk := pm["base_unit_price_inr"].(float64); bOk {
-				unitPriceVal = baseRate
+	if nodeType == "BOOKABLE" && priceType == "FIXED" {
+		if unitPriceVal <= 0 && payload.Metadata != nil {
+			if pm, ok := payload.Metadata["pricing_matrix"].(map[string]interface{}); ok {
+				if baseRate, bOk := pm["base_unit_price_inr"].(float64); bOk {
+					unitPriceVal = baseRate
+				}
 			}
 		}
-	}
-	if unitPriceVal <= 0 {
-		unitPriceVal = 7.50
+		if unitPriceVal <= 0 {
+			unitPriceVal = 7.50
+		}
 	}
 
 	moqVal := payload.MinOrderQuantity
-	if moqVal <= 0 && payload.MOQUnits > 0 {
-		moqVal = payload.MOQUnits
-	}
-	if moqVal <= 0 && payload.Metadata != nil {
-		if mVal, mOk := payload.Metadata["moq_units"].(float64); mOk {
-			moqVal = int(mVal)
+	if nodeType == "BOOKABLE" {
+		if moqVal <= 0 && payload.MOQUnits > 0 {
+			moqVal = payload.MOQUnits
 		}
-	}
-	if moqVal <= 0 {
-		moqVal = 1000
+		if moqVal <= 0 && payload.Metadata != nil {
+			if mVal, mOk := payload.Metadata["moq_units"].(float64); mOk {
+				moqVal = int(mVal)
+			}
+		}
+		if moqVal <= 0 {
+			moqVal = 1000
+		}
 	}
 
 	// Resolve location coordinates
@@ -237,8 +326,20 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 
 	attrBytes, _ := json.Marshal(attrMap)
 
+	statusVal := strings.ToUpper(strings.TrimSpace(payload.Status))
+	if statusVal == "" {
+		if nodeType == "GROUPING" {
+			statusVal = "APPROVED"
+		} else {
+			statusVal = "PENDING_ADMIN_APPROVAL"
+		}
+	}
+
 	item := &domain.VendorCatalogItem{
 		VendorUserID:     vendorUser.ID,
+		NodeType:         nodeType,
+		PriceType:        priceType,
+		DisplayOrder:     payload.DisplayOrder,
 		Title:            payload.Title,
 		Description:      payload.Description,
 		SKU:              payload.SKU,
@@ -248,20 +349,28 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		MinOrderQuantity: moqVal,
 		Images:           payload.Images,
 		Attributes:       attrBytes,
-		Status:           "PENDING_ADMIN_APPROVAL",
+		IncludedServices: payload.IncludedServices,
+		OptionalServices: payload.OptionalServices,
+		FulfilmentInfo:   payload.FulfilmentInfo,
+		Status:           statusVal,
 		PickupLat:        latVal,
 		PickupLng:        lngVal,
 		PickupAddress:    addrText,
-		IsAvailable:      false,
+		IsAvailable:      statusVal == "ACTIVE_IN_CATALOG" || statusVal == "APPROVED",
 	}
 
 	if item.Title == "" {
-		item.Title = "Brick & Building Material Listing"
+		if nodeType == "GROUPING" {
+			item.Title = "Category Group"
+		} else {
+			item.Title = "Catalog Offering"
+		}
 	}
-	if item.PriceUnit == "" {
+
+	if item.PriceUnit == "" && nodeType == "BOOKABLE" {
 		item.PriceUnit = "PER_PIECE"
 	}
-	if item.StockQuantity <= 0 {
+	if item.StockQuantity <= 0 && nodeType == "BOOKABLE" {
 		item.StockQuantity = 100000
 	}
 
@@ -279,17 +388,165 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		}
 	}
 
+	if payload.ParentID != nil && *payload.ParentID != "" {
+		pID, err := uuid.Parse(*payload.ParentID)
+		if err == nil {
+			item.ParentID = &pID
+		}
+	}
+
 	created, err := h.catalogService.CreateCatalogItem(r.Context(), item)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to create catalog service item", err.Error())
+		response.Error(w, http.StatusInternalServerError, "Failed to create catalog node or offering", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, "Vendor service created successfully and submitted for PENDING_ADMIN_APPROVAL", created)
+	response.JSON(w, http.StatusCreated, "Vendor catalog item created successfully", created)
+}
+
+// MoveCatalogNode handles POST /api/v1/vendor/catalog/{id}/move
+func (h *CatalogHandler) MoveCatalogNode(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	itemID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid catalog item ID", nil)
+		return
+	}
+
+	var payload struct {
+		VendorUserID string  `json:"vendor_user_id"`
+		ParentID     *string `json:"parent_id"`
+		DisplayOrder int     `json:"display_order"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON", err.Error())
+		return
+	}
+
+	var vendorUID uuid.UUID
+	if payload.VendorUserID != "" {
+		vendorUID, _ = uuid.Parse(payload.VendorUserID)
+	}
+	if vendorUID == uuid.Nil {
+		claims, ok := middleware.GetUserClaims(r.Context())
+		if ok && claims.SupabaseUID != "" {
+			vUser, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+			if vUser != nil {
+				vendorUID = vUser.ID
+			}
+		}
+	}
+	if vendorUID == uuid.Nil {
+		existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
+		if getErr == nil && existing != nil {
+			vendorUID = existing.VendorUserID
+		}
+	}
+
+	var newParentID *uuid.UUID
+	if payload.ParentID != nil && *payload.ParentID != "" {
+		parsedP, pErr := uuid.Parse(*payload.ParentID)
+		if pErr == nil {
+			newParentID = &parsedP
+		}
+	}
+
+	err = h.catalogService.MoveCatalogNode(r.Context(), itemID, vendorUID, newParentID, payload.DisplayOrder)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Failed to move catalog node", err.Error())
+		return
+	}
+
+	updated, _ := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
+	response.JSON(w, http.StatusOK, "Catalog node moved successfully", updated)
+}
+
+// ReorderCatalogNodes handles POST /api/v1/vendor/catalog/reorder
+func (h *CatalogHandler) ReorderCatalogNodes(w http.ResponseWriter, r *http.Request) {
+	var payload struct {
+		VendorUserID string   `json:"vendor_user_id"`
+		ParentID     *string  `json:"parent_id"`
+		NodeIDs      []string `json:"node_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON", err.Error())
+		return
+	}
+
+	var vendorUID uuid.UUID
+	if payload.VendorUserID != "" {
+		vendorUID, _ = uuid.Parse(payload.VendorUserID)
+	}
+	if vendorUID == uuid.Nil {
+		claims, ok := middleware.GetUserClaims(r.Context())
+		if ok && claims.SupabaseUID != "" {
+			vUser, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+			if vUser != nil {
+				vendorUID = vUser.ID
+			}
+		}
+	}
+
+	var parentID *uuid.UUID
+	if payload.ParentID != nil && *payload.ParentID != "" {
+		parsedP, pErr := uuid.Parse(*payload.ParentID)
+		if pErr == nil {
+			parentID = &parsedP
+		}
+	}
+
+	var nodeUUIDs []uuid.UUID
+	for _, nIDStr := range payload.NodeIDs {
+		if parsed, pErr := uuid.Parse(nIDStr); pErr == nil {
+			nodeUUIDs = append(nodeUUIDs, parsed)
+		}
+	}
+
+	err := h.catalogService.ReorderCatalogNodes(r.Context(), vendorUID, parentID, nodeUUIDs)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Failed to reorder catalog nodes", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Catalog nodes reordered successfully", nil)
+}
+
+func (h *CatalogHandler) requireAdmin(r *http.Request) (*domain.User, error) {
+	if h.userRepo == nil {
+		return nil, fmt.Errorf("user repository unavailable")
+	}
+	claims, ok := middleware.GetUserClaims(r.Context())
+	if ok && claims.SupabaseUID != "" {
+		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+		if err == nil && u != nil && u.Role == domain.RoleAdmin {
+			return u, nil
+		}
+	}
+	authHeader := r.Header.Get("Authorization")
+	if authHeader != "" {
+		parts := strings.Split(authHeader, " ")
+		tokenStr := authHeader
+		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
+			tokenStr = parts[1]
+		}
+		if uid, err := uuid.Parse(tokenStr); err == nil {
+			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil && u.Role == domain.RoleAdmin {
+				return u, nil
+			}
+		}
+		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil && u.Role == domain.RoleAdmin {
+			return u, nil
+		}
+	}
+	return nil, fmt.Errorf("admin credentials required")
 }
 
 // ListAdminCatalogRequests handles GET /api/v1/admin/catalog/requests
 func (h *CatalogHandler) ListAdminCatalogRequests(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.requireAdmin(r); err != nil {
+		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+		return
+	}
 	status := r.URL.Query().Get("status")
 	if status == "" {
 		status = "PENDING_ADMIN_APPROVAL"
@@ -306,6 +563,10 @@ func (h *CatalogHandler) ListAdminCatalogRequests(w http.ResponseWriter, r *http
 
 // ApproveCatalogItem handles POST /api/v1/admin/catalog/{id}/approve
 func (h *CatalogHandler) ApproveCatalogItem(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.requireAdmin(r); err != nil {
+		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	itemID, err := uuid.Parse(idStr)
 	if err != nil {
@@ -313,7 +574,19 @@ func (h *CatalogHandler) ApproveCatalogItem(w http.ResponseWriter, r *http.Reque
 		return
 	}
 
-	approved, err := h.catalogService.ApproveCatalogItem(r.Context(), itemID)
+	var reviewerID *uuid.UUID
+	reviewerName := "Admin Reviewer"
+	claims, ok := middleware.GetUserClaims(r.Context())
+	if ok && claims.SupabaseUID != "" {
+		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID); u != nil {
+			reviewerID = &u.ID
+			if u.FullName != "" {
+				reviewerName = u.FullName
+			}
+		}
+	}
+
+	approved, err := h.catalogService.ApproveCatalogItemWithReviewer(r.Context(), itemID, reviewerID, reviewerName)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to approve catalog service listing", err.Error())
 		return
@@ -322,8 +595,56 @@ func (h *CatalogHandler) ApproveCatalogItem(w http.ResponseWriter, r *http.Reque
 	response.JSON(w, http.StatusOK, "Catalog service listing APPROVED and activated in catalog", approved)
 }
 
+// RequestChangesCatalogItem handles POST /api/v1/admin/catalog/{id}/request-changes
+func (h *CatalogHandler) RequestChangesCatalogItem(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.requireAdmin(r); err != nil {
+		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+		return
+	}
+	idStr := chi.URLParam(r, "id")
+	itemID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid catalog item ID", nil)
+		return
+	}
+
+	var payload struct {
+		Notes string `json:"notes"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	if strings.TrimSpace(payload.Notes) == "" {
+		response.Error(w, http.StatusBadRequest, "Change request notes are mandatory", nil)
+		return
+	}
+
+	var reviewerID *uuid.UUID
+	reviewerName := "Admin Reviewer"
+	claims, ok := middleware.GetUserClaims(r.Context())
+	if ok && claims.SupabaseUID != "" {
+		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID); u != nil {
+			reviewerID = &u.ID
+			if u.FullName != "" {
+				reviewerName = u.FullName
+			}
+		}
+	}
+
+	res, err := h.catalogService.RequestChangesCatalogItem(r.Context(), itemID, payload.Notes, reviewerID, reviewerName)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to request changes", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Changes requested successfully", res)
+}
+
 // RejectCatalogItem handles POST /api/v1/admin/catalog/{id}/reject
 func (h *CatalogHandler) RejectCatalogItem(w http.ResponseWriter, r *http.Request) {
+	if _, err := h.requireAdmin(r); err != nil {
+		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+		return
+	}
 	idStr := chi.URLParam(r, "id")
 	itemID, err := uuid.Parse(idStr)
 	if err != nil {
@@ -336,13 +657,58 @@ func (h *CatalogHandler) RejectCatalogItem(w http.ResponseWriter, r *http.Reques
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
-	rejected, err := h.catalogService.RejectCatalogItem(r.Context(), itemID, payload.RejectionReason)
+	if strings.TrimSpace(payload.RejectionReason) == "" {
+		response.Error(w, http.StatusBadRequest, "Rejection reason is mandatory", nil)
+		return
+	}
+
+	var reviewerID *uuid.UUID
+	reviewerName := "Admin Reviewer"
+	claims, ok := middleware.GetUserClaims(r.Context())
+	if ok && claims.SupabaseUID != "" {
+		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID); u != nil {
+			reviewerID = &u.ID
+			if u.FullName != "" {
+				reviewerName = u.FullName
+			}
+		}
+	}
+
+	rejected, err := h.catalogService.RejectCatalogItemWithReviewer(r.Context(), itemID, payload.RejectionReason, reviewerID, reviewerName)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to reject catalog service listing", err.Error())
 		return
 	}
 
 	response.JSON(w, http.StatusOK, "Catalog service listing REJECTED", rejected)
+}
+
+// ArchiveCatalogItem handles POST /api/v1/vendor/catalog/{id}/archive
+func (h *CatalogHandler) ArchiveCatalogItem(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	itemID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid catalog item ID", nil)
+		return
+	}
+
+	var payload struct {
+		VendorUserID string `json:"vendor_user_id"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&payload)
+
+	var vendorUID uuid.UUID
+	if payload.VendorUserID != "" {
+		vendorUID, _ = uuid.Parse(payload.VendorUserID)
+	}
+
+	err = h.catalogService.ArchiveCatalogItem(r.Context(), itemID, vendorUID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to archive catalog item", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Catalog item archived successfully", nil)
 }
 
 // UpdateCatalogItem handles PUT /api/v1/vendor/catalog/{id}
@@ -359,12 +725,18 @@ func (h *CatalogHandler) UpdateCatalogItem(w http.ResponseWriter, r *http.Reques
 		Title            string          `json:"title"`
 		Description      string          `json:"description"`
 		SKU              string          `json:"sku"`
+		NodeType         string          `json:"node_type"`
+		PriceType        string          `json:"price_type"`
+		DisplayOrder     int             `json:"display_order"`
 		UnitPrice        float64         `json:"unit_price"`
 		PriceUnit        string          `json:"price_unit"`
 		StockQuantity    int             `json:"stock_quantity"`
 		MinOrderQuantity int             `json:"min_order_quantity"`
 		Images           json.RawMessage `json:"images"`
 		Attributes       json.RawMessage `json:"attributes"`
+		IncludedServices json.RawMessage `json:"included_services"`
+		OptionalServices json.RawMessage `json:"optional_services"`
+		FulfilmentInfo   json.RawMessage `json:"fulfilment_info"`
 		PickupLat        float64         `json:"pickup_lat"`
 		PickupLng        float64         `json:"pickup_lng"`
 		PickupAddress    string          `json:"pickup_address"`
@@ -377,9 +749,10 @@ func (h *CatalogHandler) UpdateCatalogItem(w http.ResponseWriter, r *http.Reques
 	}
 
 	var vendorUID uuid.UUID
+	var vUser *domain.User
 	claims, ok := middleware.GetUserClaims(r.Context())
 	if ok && claims.SupabaseUID != "" {
-		vUser, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+		vUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
 		if vUser != nil {
 			vendorUID = vUser.ID
 		}
@@ -390,20 +763,25 @@ func (h *CatalogHandler) UpdateCatalogItem(w http.ResponseWriter, r *http.Reques
 			vendorUID = parsed
 		}
 	}
-	if vendorUID == uuid.Nil {
-		existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
-		if getErr == nil && existing != nil {
-			vendorUID = existing.VendorUserID
-		}
+	existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
+	if getErr != nil || existing == nil {
+		response.Error(w, http.StatusNotFound, "Catalog item not found", nil)
+		return
 	}
 	if vendorUID == uuid.Nil {
-		response.Error(w, http.StatusBadRequest, "Invalid vendor_user_id format or unauthenticated vendor", nil)
+		vendorUID = existing.VendorUserID
+	}
+	if vUser != nil && vUser.Role != domain.RoleAdmin && existing.VendorUserID != vUser.ID {
+		response.Error(w, http.StatusForbidden, "Unauthorized: you do not have permission to modify another vendor's catalog item", nil)
 		return
 	}
 
 	item := &domain.VendorCatalogItem{
 		ID:               itemID,
 		VendorUserID:     vendorUID,
+		NodeType:         payload.NodeType,
+		PriceType:        payload.PriceType,
+		DisplayOrder:     payload.DisplayOrder,
 		Title:            payload.Title,
 		Description:      payload.Description,
 		SKU:              payload.SKU,
@@ -413,6 +791,9 @@ func (h *CatalogHandler) UpdateCatalogItem(w http.ResponseWriter, r *http.Reques
 		MinOrderQuantity: payload.MinOrderQuantity,
 		Images:           payload.Images,
 		Attributes:       payload.Attributes,
+		IncludedServices: payload.IncludedServices,
+		OptionalServices: payload.OptionalServices,
+		FulfilmentInfo:   payload.FulfilmentInfo,
 		Status:           "PENDING_ADMIN_APPROVAL", // Resubmission resets to pending admin approval
 		PickupLat:        payload.PickupLat,
 		PickupLng:        payload.PickupLng,
@@ -452,4 +833,109 @@ func (h *CatalogHandler) DeleteCatalogItem(w http.ResponseWriter, r *http.Reques
 	}
 
 	response.JSON(w, http.StatusOK, "Catalog item deleted successfully", nil)
+}
+
+
+// ============================================================================
+// PHASE 4: CUSTOMER MARKETPLACE & DISCOVERY HANDLERS
+// ============================================================================
+
+// GetMarketplaceOfferingByID handles GET /api/v1/catalog/items/{id} and GET /api/v1/catalog/{id}
+func (h *CatalogHandler) GetMarketplaceOfferingByID(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	offeringID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid offering ID format", err.Error())
+		return
+	}
+
+	item, breadcrumbs, err := h.catalogService.GetMarketplaceOfferingByID(r.Context(), offeringID)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Offering details retrieved", map[string]interface{}{
+		"item":        item,
+		"breadcrumbs": breadcrumbs,
+		"vendor":      item.VendorUser,
+		"category":    item.Category,
+	})
+}
+
+// GetEligibleVendorsByCategory handles GET /api/v1/categories/{category_id}/vendors
+func (h *CatalogHandler) GetEligibleVendorsByCategory(w http.ResponseWriter, r *http.Request) {
+	catParam := chi.URLParam(r, "category_id")
+	var catID *uuid.UUID
+	var catSlug string
+	if parsed, err := uuid.Parse(catParam); err == nil {
+		catID = &parsed
+	} else {
+		catSlug = catParam
+	}
+
+	lat, _ := strconv.ParseFloat(r.URL.Query().Get("lat"), 64)
+	lng, _ := strconv.ParseFloat(r.URL.Query().Get("lng"), 64)
+	page, _ := strconv.Atoi(r.URL.Query().Get("page"))
+	if page < 1 {
+		page = 1
+	}
+	limit, _ := strconv.Atoi(r.URL.Query().Get("limit"))
+	if limit < 1 || limit > 50 {
+		limit = 20
+	}
+	offset := (page - 1) * limit
+
+	vendors, total, err := h.catalogService.GetEligibleVendorsByCategory(r.Context(), catID, catSlug, lat, lng, limit, offset)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to retrieve category vendors", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Eligible vendors retrieved", map[string]interface{}{
+		"vendors": vendors,
+		"total":   total,
+		"page":    page,
+		"limit":   limit,
+	})
+}
+
+// CompareOfferings handles POST /api/v1/catalog/compare and GET /api/v1/catalog/compare
+func (h *CatalogHandler) CompareOfferings(w http.ResponseWriter, r *http.Request) {
+	var ids []uuid.UUID
+
+	if r.Method == http.MethodPost {
+		var req struct {
+			OfferingIDs []string `json:"offering_ids"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err == nil {
+			for _, idStr := range req.OfferingIDs {
+				if parsed, pErr := uuid.Parse(idStr); pErr == nil {
+					ids = append(ids, parsed)
+				}
+			}
+		}
+	} else {
+		idsParam := r.URL.Query().Get("ids")
+		if idsParam != "" {
+			for _, idStr := range strings.Split(idsParam, ",") {
+				if parsed, pErr := uuid.Parse(strings.TrimSpace(idStr)); pErr == nil {
+					ids = append(ids, parsed)
+				}
+			}
+		}
+	}
+
+	if len(ids) < 1 {
+		response.Error(w, http.StatusBadRequest, "Please provide offering_ids for comparison", nil)
+		return
+	}
+
+	result, err := h.catalogService.CompareMarketplaceOfferings(r.Context(), ids)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Offerings comparison retrieved", result)
 }

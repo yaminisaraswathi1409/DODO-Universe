@@ -1,4 +1,4 @@
-const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
+export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
 
 export interface UserProfile {
   id: string;
@@ -19,6 +19,8 @@ export interface UserProfile {
   mobile_verified?: boolean;
   otp_code?: string;
   face_verified?: boolean;
+  is_suspended?: boolean;
+  suspension_reason?: string;
 }
 
 export interface UserAddress {
@@ -95,6 +97,12 @@ export interface Category {
   description: string;
   icon: string;
   default_workflow: string;
+  parent_id?: string | null;
+  level?: number;
+  path?: string;
+  display_order?: number;
+  is_selectable?: boolean;
+  children?: Category[];
   required_documents?: RequiredDocumentSpec[];
   opportunity_fields?: OpportunityFieldSpec[];
   resources?: ResourceConfig[];
@@ -103,6 +111,43 @@ export interface Category {
   driver_fields?: ResourceFieldConfig[];
   related_services?: any[];
 }
+
+export type VendorCategoryApprovalStatus =
+  | 'PENDING_APPROVAL'
+  | 'CHANGES_REQUESTED'
+  | 'ACTIVE'
+  | 'REJECTED'
+  | 'SUSPENDED';
+
+export interface ApprovalHistoryEntry {
+  id: string;
+  action: string;
+  previous_status: string;
+  new_status: string;
+  admin_id?: string;
+  notes?: string;
+  created_at: string;
+}
+
+export interface VendorCategoryApproval {
+  id: string;
+  vendor_id: string;
+  vendor?: UserProfile;
+  category_id: string;
+  category?: Category;
+  canonical_asset_id: string;
+  canonical_asset?: UserServiceAsset;
+  secondary_asset_ids: string[];
+  secondary_assets?: UserServiceAsset[];
+  status: VendorCategoryApprovalStatus;
+  change_request_notes?: string;
+  rejection_reason?: string;
+  history: ApprovalHistoryEntry[];
+  created_at: string;
+  updated_at: string;
+  approved_at?: string;
+}
+
 
 export interface UserServiceAsset {
   id: string;
@@ -934,6 +979,179 @@ export async function getStatusHistory(id: string): Promise<OpportunityStatusHis
   }
 }
 
+// ============================================================================
+// PHASE 6: ORDER FULFILMENT & LOGISTICS API METHODS
+// ============================================================================
+
+export async function getVendorOrders(vendorId: string, status?: string): Promise<Opportunity[]> {
+  try {
+    const url = new URL(`${API_BASE_URL}/vendor/orders`);
+    url.searchParams.set('vendor_id', vendorId);
+    if (status && status !== 'ALL') {
+      url.searchParams.set('status', status);
+    }
+    const res = await fetch(url.toString(), {
+      headers: { 'X-User-ID': vendorId },
+      cache: 'no-store',
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getVendorOrderDetail(orderId: string, vendorId: string): Promise<Opportunity | null> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/vendor/orders/${orderId}?vendor_id=${vendorId}`, {
+      headers: { 'X-User-ID': vendorId },
+      cache: 'no-store',
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function executeVendorOrderAction(
+  orderId: string,
+  vendorId: string,
+  payload: { action: 'ACCEPT' | 'REJECT' | 'PREPARE' | 'READY_FOR_PICKUP'; rejection_reason?: string; preparation_notes?: string }
+): Promise<boolean> {
+  const res = await fetch(`${API_BASE_URL}/vendor/orders/${orderId}/actions?vendor_id=${vendorId}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'X-User-ID': vendorId },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return true;
+}
+
+export async function matchTransportProviders(payload: {
+  pickup_lat: number;
+  pickup_lng: number;
+  delivery_lat: number;
+  delivery_lng: number;
+  radius_km?: number;
+}): Promise<any[]> {
+  try {
+    const res = await fetch(`${API_BASE_URL}/logistics/providers/match`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function assignDriverAndVehicle(payload: {
+  opportunity_id: string;
+  vehicle_id: string;
+  driver_id: string;
+  license_number?: string;
+  license_class?: string;
+  replace_existing?: boolean;
+  reassignment_reason?: string;
+}): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/logistics/assign-driver-vehicle`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function registerProofOfLoadingExtended(payload: {
+  opportunity_id: string;
+  photo_urls: string[];
+  loaded_quantity: number;
+  cargo_unit?: string;
+  location_lat?: number;
+  location_lng?: number;
+  address_text?: string;
+  authorized_by_name?: string;
+  driver_notes?: string;
+  discrepancy_notes?: string;
+}): Promise<WayManifest> {
+  const res = await fetch(`${API_BASE_URL}/logistics/manifests/pol`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function registerProofOfDeliveryExtended(payload: {
+  opportunity_id: string;
+  photo_urls?: string[];
+  signature_url?: string;
+  delivered_quantity: number;
+  cargo_unit?: string;
+  recipient_name: string;
+  delivery_notes?: string;
+  damaged_quantity?: number;
+}): Promise<WayManifest> {
+  const res = await fetch(`${API_BASE_URL}/logistics/manifests/pod`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function generateDeliveryOTP(opportunityId: string): Promise<string> {
+  const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/delivery-otp`, {
+    method: 'POST',
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data?.delivery_otp || '';
+}
+
+export async function verifySecureDeliveryOTP(opportunityId: string, otpCode: string, verifiedBy?: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/verify-delivery-otp-secure`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(verifiedBy ? { 'X-User-ID': verifiedBy } : {}),
+    },
+    body: JSON.stringify({ otp_code: otpCode }),
+  });
+  if (!res.ok) {
+    const errText = await res.text();
+    try {
+      const parsed = JSON.parse(errText);
+      throw new Error(parsed.message || parsed.error || errText);
+    } catch (e: any) {
+      throw new Error(e.message || errText);
+    }
+  }
+  return true;
+}
+
+export async function transitionOrderStatus(opportunityId: string, toStatus: string, notes?: string): Promise<boolean> {
+  const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/status-transition`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ to_status: toStatus, notes: notes || '' }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  return true;
+}
+
 // User Saved Address API Methods
 
 export async function getUserAddresses(userId: string): Promise<UserAddress[]> {
@@ -1128,6 +1346,24 @@ export function clearUserSession(): void {
   localStorage.removeItem('uop_access_token');
 }
 
+export interface AdditionalServiceItem {
+  id: string;
+  name: string;
+  description?: string;
+  is_included: boolean;
+  price?: number;
+  price_unit?: string;
+  is_available?: boolean;
+}
+
+export interface CatalogReviewEntry {
+  timestamp: string;
+  action: string;
+  reviewer_id?: string;
+  reviewer_name?: string;
+  notes?: string;
+}
+
 export interface VendorCatalogItem {
   id: string;
   vendor_asset_id?: string;
@@ -1136,6 +1372,12 @@ export interface VendorCatalogItem {
   vendor_user?: UserProfile;
   category_id?: string;
   category?: Category;
+  parent_id?: string | null;
+  node_type?: 'GROUPING' | 'BOOKABLE';
+  level?: number;
+  path?: string;
+  display_order?: number;
+  price_type?: 'FIXED' | 'QUOTATION';
   title: string;
   description?: string;
   sku?: string;
@@ -1145,14 +1387,20 @@ export interface VendorCatalogItem {
   min_order_quantity?: number;
   images?: string[];
   attributes?: Record<string, any>;
-  status?: 'PENDING_ADMIN_APPROVAL' | 'ACTIVE_IN_CATALOG' | 'APPROVED' | 'REJECTED';
+  included_services?: AdditionalServiceItem[];
+  optional_services?: AdditionalServiceItem[];
+  fulfilment_info?: Record<string, any>;
+  status?: 'DRAFT' | 'PENDING_ADMIN_APPROVAL' | 'ACTIVE_IN_CATALOG' | 'APPROVED' | 'CHANGES_REQUESTED' | 'REJECTED' | 'ARCHIVED';
+  change_request_notes?: string;
   rejection_reason?: string;
+  review_history?: CatalogReviewEntry[];
   pickup_lat?: number;
   pickup_lng?: number;
   pickup_address?: string;
   is_available: boolean;
   created_at?: string;
   updated_at?: string;
+  children?: VendorCatalogItem[];
   [key: string]: any;
 }
 
@@ -1263,6 +1511,75 @@ export async function rejectCatalogItem(id: string, rejectionReason: string): Pr
   return json.data;
 }
 
+export async function requestChangesCatalogItem(id: string, notes: string): Promise<VendorCatalogItem> {
+  const res = await fetch(`${API_BASE_URL}/admin/catalog/${id}/request-changes`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ notes }),
+  });
+  if (!res.ok) throw new Error(await res.text());
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getVendorCatalogTree(vendorId: string, categoryId?: string, includeUnapproved = true): Promise<VendorCatalogItem[]> {
+  try {
+    const params = new URLSearchParams();
+    if (categoryId) params.append('category_id', categoryId);
+    if (includeUnapproved) params.append('all', 'true');
+    const res = await fetch(`${API_BASE_URL}/vendors/${vendorId}/catalog/tree?${params.toString()}`);
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data?.tree || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function moveCatalogNode(id: string, vendorUserId: string, parentId: string | null, displayOrder = 0): Promise<VendorCatalogItem> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}/move`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ vendor_user_id: vendorUserId, parent_id: parentId, display_order: displayOrder }),
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to move catalog node');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function reorderCatalogNodes(vendorUserId: string, parentId: string | null, nodeIds: string[]): Promise<boolean> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/reorder`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ vendor_user_id: vendorUserId, parent_id: parentId, node_ids: nodeIds }),
+  });
+  return res.ok;
+}
+
+export async function archiveCatalogItem(id: string, vendorUserId: string): Promise<boolean> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/catalog/${id}/archive`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ vendor_user_id: vendorUserId }),
+  });
+  return res.ok;
+}
+
 export async function verifyDeliveryOTP(opportunityId: string, otpCode: string): Promise<boolean> {
   const res = await fetch(`${API_BASE_URL}/opportunities/${opportunityId}/verify-delivery-otp`, {
     method: 'POST',
@@ -1318,8 +1635,934 @@ export async function getProviderOffers(categoryId?: string): Promise<ProviderOf
   }
 }
 
+// -----------------------------------------------------------------------------
+// USER JOURNEY APIs (Phase A)
+// -----------------------------------------------------------------------------
+
+export interface UserJourney {
+  id: string;
+  user_id: string;
+  user?: UserProfile;
+  title: string;
+  description?: string;
+  status: string; // 'OPEN' (Active), 'PAUSED', 'CANCELLED', 'COMPLETED'
+  origin_address: string;
+  origin_lat: number;
+  origin_lng: number;
+  destination_address: string;
+  destination_lat: number;
+  destination_lng: number;
+  travel_mode: string;
+  journey_type: string; // 'ONE_TIME', 'RECURRING'
+  travel_frequency: string; // 'ONE_TIME', 'DAILY', 'WEEKDAYS', 'WEEKENDS', 'CUSTOM'
+  available_days?: string[];
+  departure_window_start?: string;
+  departure_window_end?: string;
+  arrival_window_start?: string;
+  arrival_window_end?: string;
+  max_detour_km: number;
+  max_detour_minutes: number;
+  is_active: boolean;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface RegisterJourneyPayload {
+  user_id?: string;
+  origin_address: string;
+  origin_lat: number;
+  origin_lng: number;
+  destination_address: string;
+  destination_lat: number;
+  destination_lng: number;
+  travel_mode: string;
+  journey_type: string; // 'ONE_TIME', 'RECURRING'
+  travel_frequency: string; // 'ONE_TIME', 'DAILY', 'WEEKDAYS', 'WEEKENDS', 'CUSTOM'
+  available_days?: string[];
+  departure_window_start?: string;
+  departure_window_end?: string;
+  arrival_window_start?: string;
+  arrival_window_end?: string;
+  max_detour_km?: number;
+  max_detour_minutes?: number;
+}
+
+export async function registerJourney(payload: RegisterJourneyPayload): Promise<UserJourney> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const storedUser = getStoredUser();
+  const effectivePayload = {
+    ...payload,
+    user_id: payload.user_id || storedUser?.id || undefined,
+  };
+
+  const res = await fetch(`${API_BASE_URL}/journeys`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(effectivePayload),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to register journey');
+  }
+
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getUserJourneys(userId?: string): Promise<UserJourney[]> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+    const storedUser = getStoredUser();
+    const targetUserId = userId || storedUser?.id || '';
+
+    const params = new URLSearchParams();
+    if (targetUserId) params.append('user_id', targetUserId);
+
+    const res = await fetch(`${API_BASE_URL}/journeys?${params.toString()}`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      cache: 'no-store',
+    });
+
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getJourneyByID(id: string, userId?: string): Promise<UserJourney | null> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+    const storedUser = getStoredUser();
+    const targetUserId = userId || storedUser?.id || '';
+
+    const params = new URLSearchParams();
+    if (targetUserId) params.append('user_id', targetUserId);
+
+    const res = await fetch(`${API_BASE_URL}/journeys/${id}?${params.toString()}`, {
+      headers: {
+        ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      },
+      cache: 'no-store',
+    });
+
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateJourney(id: string, payload: Partial<RegisterJourneyPayload>, userId?: string): Promise<UserJourney> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const storedUser = getStoredUser();
+  const targetUserId = userId || storedUser?.id || '';
+
+  const params = new URLSearchParams();
+  if (targetUserId) params.append('user_id', targetUserId);
+
+  const res = await fetch(`${API_BASE_URL}/journeys/${id}?${params.toString()}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to update journey');
+  }
+
+  const json = await res.json();
+  return json.data;
+}
+
+export async function setJourneyStatus(id: string, action: 'PAUSE' | 'RESUME' | 'CANCEL', userId?: string): Promise<boolean> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const storedUser = getStoredUser();
+  const targetUserId = userId || storedUser?.id || '';
+
+  const params = new URLSearchParams();
+  if (targetUserId) params.append('user_id', targetUserId);
+
+  const res = await fetch(`${API_BASE_URL}/journeys/${id}/status?${params.toString()}`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ action }),
+  });
+
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || `Failed to ${action.toLowerCase()} journey`);
+  }
+
+  return true;
+}
+
+// ---------------------------------------------------------------------------
+// Phase 1: Platform Category Hierarchy and Vendor Governance API Client
+// ---------------------------------------------------------------------------
+
+export async function getCategoryHierarchyTree(): Promise<Category[]> {
+  const res = await fetch(`${API_BASE_URL}/categories/tree`, {
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to fetch category hierarchy');
+  }
+  const json = await res.json();
+  return json.data || [];
+}
+
+export async function updateCategoryParent(
+  id: string,
+  parentId: string | null,
+  displayOrder: number = 0
+): Promise<Category> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${id}/parent`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ parent_id: parentId, display_order: displayOrder }),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to update category parent');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function toggleCategorySelectable(id: string, isSelectable: boolean): Promise<Category> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const res = await fetch(`${API_BASE_URL}/admin/categories/${id}/selectable`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify({ is_selectable: isSelectable }),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to update category selectability');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getVendorCategoryApprovals(vendorId?: string): Promise<VendorCategoryApproval[]> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const storedUser = getStoredUser();
+  const vId = vendorId || storedUser?.id || '';
+  const res = await fetch(`${API_BASE_URL}/vendor/categories/approvals?vendor_id=${vId}`, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to fetch vendor approvals');
+  }
+  const json = await res.json();
+  return json.data || [];
+}
+
+export async function applyForCategory(payload: {
+  vendor_id: string;
+  category_id: string;
+  asset_id: string;
+  secondary_asset_ids?: string[];
+  notes?: string;
+}): Promise<VendorCategoryApproval> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/categories/apply`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to apply for category');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function resubmitCategoryApplication(
+  id: string,
+  payload: {
+    vendor_id: string;
+    asset_id: string;
+    secondary_asset_ids?: string[];
+    notes?: string;
+  }
+): Promise<VendorCategoryApproval> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const res = await fetch(`${API_BASE_URL}/vendor/categories/resubmit/${id}`, {
+    method: 'PUT',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to resubmit category application');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getAdminCategoryApprovals(status?: string): Promise<VendorCategoryApproval[]> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const url = status
+    ? `${API_BASE_URL}/admin/categories/approvals?status=${encodeURIComponent(status)}`
+    : `${API_BASE_URL}/admin/categories/approvals`;
+  const res = await fetch(url, {
+    headers: {
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to fetch admin approvals');
+  }
+  const json = await res.json();
+  return json.data || [];
+}
+
+export async function reviewCategoryApproval(
+  id: string,
+  payload: {
+    admin_id: string;
+    action: 'APPROVE' | 'REJECT' | 'REQUEST_CHANGES' | 'SUSPEND';
+    notes?: string;
+  }
+): Promise<VendorCategoryApproval> {
+  const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') || localStorage.getItem('uop_token') : null;
+  const res = await fetch(`${API_BASE_URL}/admin/categories/approvals/${id}/review`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errData = await res.json().catch(() => ({}));
+    throw new Error(errData.message || errData.error || 'Failed to review category approval');
+  }
+  const json = await res.json();
+  return json.data;
+}
 
 
 
 
+// ============================================================================
+// PHASE 4: CUSTOMER MARKETPLACE & DISCOVERY API CLIENT
+// ============================================================================
 
+export interface CatalogBreadcrumb {
+  id: string;
+  title: string;
+  node_type: string;
+  level: number;
+}
+
+export interface MarketplaceVendorCard {
+  vendor_id: string;
+  vendor_name: string;
+  vendor_phone?: string;
+  vendor_avatar?: string;
+  trust_score: number;
+  is_verified: boolean;
+  address_text?: string;
+  lat?: number;
+  lng?: number;
+  distance_km?: number | null;
+  category_name?: string;
+  category_slug?: string;
+  offering_count: number;
+  min_price?: number;
+  max_price?: number;
+  price_unit?: string;
+  sample_offerings?: VendorCatalogItem[];
+}
+
+export interface OfferingComparisonResponse {
+  items: VendorCatalogItem[];
+  common_specs: string[];
+  all_spec_keys: string[];
+  price_units: string[];
+  has_mixed_units: boolean;
+}
+
+export interface MarketplaceFilterParams {
+  query?: string;
+  category?: string;
+  category_id?: string;
+  vendor_id?: string;
+  min_price?: number;
+  max_price?: number;
+  price_type?: string;
+  in_stock?: boolean;
+  lat?: number;
+  lng?: number;
+  radius_km?: number;
+  sort_by?: string;
+  page?: number;
+  limit?: number;
+}
+
+export interface MarketplaceOfferingDetailResponse {
+  item: VendorCatalogItem;
+  breadcrumbs: CatalogBreadcrumb[];
+  vendor?: UserProfile;
+  category?: Category;
+}
+
+export async function searchMarketplaceCatalog(params: MarketplaceFilterParams = {}): Promise<{
+  items: VendorCatalogItem[];
+  total: number;
+  page: number;
+  limit: number;
+}> {
+  const query = new URLSearchParams();
+  if (params.query) query.set('q', params.query);
+  if (params.category && params.category !== 'ALL') query.set('category', params.category);
+  if (params.category_id) query.set('category_id', params.category_id);
+  if (params.vendor_id) query.set('vendor_id', params.vendor_id);
+  if (params.min_price !== undefined) query.set('min_price', params.min_price.toString());
+  if (params.max_price !== undefined) query.set('max_price', params.max_price.toString());
+  if (params.price_type && params.price_type !== 'ALL') query.set('price_type', params.price_type);
+  if (params.in_stock) query.set('in_stock', 'true');
+  if (params.lat !== undefined && params.lng !== undefined) {
+    query.set('lat', params.lat.toString());
+    query.set('lng', params.lng.toString());
+    if (params.radius_km) query.set('radius_km', params.radius_km.toString());
+  }
+  if (params.sort_by) query.set('sort_by', params.sort_by);
+  if (params.page) query.set('page', params.page.toString());
+  if (params.limit) query.set('limit', params.limit.toString());
+
+  const res = await fetch(`${API_BASE_URL}/catalog/search?${query.toString()}`, {
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to search marketplace catalog');
+  }
+  const json = await res.json();
+  return {
+    items: json.data?.items || [],
+    total: json.data?.total || 0,
+    page: json.data?.page || 1,
+    limit: json.data?.limit || 24,
+  };
+}
+
+export async function getMarketplaceOffering(id: string): Promise<MarketplaceOfferingDetailResponse> {
+  const res = await fetch(`${API_BASE_URL}/catalog/items/${id}`, {
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Offering not found or unavailable');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+export async function getEligibleVendorsByCategory(
+  categoryParam: string,
+  lat?: number,
+  lng?: number,
+  page: number = 1,
+  limit: number = 20
+): Promise<{ vendors: MarketplaceVendorCard[]; total: number }> {
+  const query = new URLSearchParams();
+  if (lat !== undefined && lng !== undefined) {
+    query.set('lat', lat.toString());
+    query.set('lng', lng.toString());
+  }
+  query.set('page', page.toString());
+  query.set('limit', limit.toString());
+
+  const res = await fetch(`${API_BASE_URL}/categories/${categoryParam}/vendors?${query.toString()}`, {
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to retrieve eligible category vendors');
+  }
+  const json = await res.json();
+  return {
+    vendors: json.data?.vendors || [],
+    total: json.data?.total || 0,
+  };
+}
+
+export async function compareMarketplaceOfferings(ids: string[]): Promise<OfferingComparisonResponse> {
+  const res = await fetch(`${API_BASE_URL}/catalog/compare`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ offering_ids: ids }),
+    cache: 'no-store',
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({}));
+    throw new Error(err.message || 'Failed to compare offerings');
+  }
+  const json = await res.json();
+  return json.data;
+}
+
+
+// ============================================================================
+// PHASE 5: CART, CHECKOUT, PRICING & INVENTORY MANAGEMENT
+// ============================================================================
+
+export interface CartValidationItem {
+  catalog_item_id: string;
+  quantity: number;
+  selected_optional_services?: string[];
+}
+
+export interface CartValidationRequest {
+  items: CartValidationItem[];
+  delivery_lat?: number;
+  delivery_lng?: number;
+  address_text?: string;
+}
+
+export interface CartItemPriceBreakdown {
+  catalog_item_id: string;
+  title: string;
+  vendor_user_id: string;
+  vendor_name: string;
+  quantity: number;
+  price_unit: string;
+  unit_price: number;
+  product_subtotal: number;
+  selected_optional_services?: AdditionalServiceItem[];
+  optional_services_subtotal: number;
+  min_order_quantity: number;
+  available_stock: number;
+}
+
+export interface PriceSnapshotItem {
+  title: string;
+  quantity: number;
+  unit_price: number;
+  subtotal: number;
+  unit: string;
+}
+
+export interface PriceSnapshotCharges {
+  delivery?: number;
+  service?: number;
+}
+
+export interface PriceSnapshot {
+  item_title: string;
+  pricing_model: string;
+  unit_price: number;
+  quantity: number;
+  subtotal: number;
+  distance_km?: number;
+  delivery_charge?: number;
+  transport_charge?: number;
+  service_fee?: number;
+  total_charges: number;
+  final_payable: number;
+  items?: PriceSnapshotItem[];
+  charges?: PriceSnapshotCharges;
+  calculated_at: string;
+}
+
+export interface CartValidationResponse {
+  is_valid: boolean;
+  rejection_reason?: string;
+  vendor_user_id?: string;
+  vendor_name?: string;
+  items?: CartItemPriceBreakdown[];
+  product_subtotal: number;
+  optional_services_subtotal: number;
+  delivery_charge: number;
+  platform_fee: number;
+  tax_amount: number;
+  final_payable: number;
+  price_snapshot?: PriceSnapshot;
+}
+
+export interface InitiateCheckoutRequest extends CartValidationRequest {
+  user_id?: string;
+  idempotency_key?: string;
+  payment_method?: string;
+}
+
+export interface InitiateCheckoutResponse {
+  opportunity_id: string;
+  payment_reference: string;
+  payment_signature: string;
+  amount: number;
+  currency: string;
+  reservation_expires: string;
+  validation: CartValidationResponse;
+}
+
+export interface PaymentCallbackRequest {
+  payment_reference: string;
+  signature: string;
+  status: 'SUCCESS' | 'FAILED';
+  gateway_txn_id?: string;
+  failure_reason?: string;
+}
+
+export async function validateCart(req: CartValidationRequest): Promise<CartValidationResponse> {
+  const res = await fetch(`${API_BASE_URL}/cart/validate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    cache: 'no-store',
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.message || json.error || 'Cart validation failed');
+  }
+  return json.data;
+}
+
+export async function initiateCheckout(req: InitiateCheckoutRequest): Promise<InitiateCheckoutResponse> {
+  const res = await fetch(`${API_BASE_URL}/checkout/initiate`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    cache: 'no-store',
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.message || json.error || 'Failed to initiate checkout');
+  }
+  return json.data;
+}
+
+export async function processPaymentCallback(req: PaymentCallbackRequest): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/checkout/payment/callback`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(req),
+    cache: 'no-store',
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.message || json.error || 'Failed to process payment callback');
+  }
+  return json.data;
+}
+
+export async function cancelCheckoutOrder(orderId: string): Promise<any> {
+  const res = await fetch(`${API_BASE_URL}/checkout/${orderId}/cancel`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    cache: 'no-store',
+  });
+  const json = await res.json();
+  if (!res.ok) {
+    throw new Error(json.message || json.error || 'Failed to cancel checkout order');
+  }
+  return json.data;
+}
+
+// ============================================================================
+// PHASE 7: NOTIFICATIONS, GOVERNANCE & OPERATIONS API
+// ============================================================================
+
+export interface NotificationPreference {
+  user_id: string;
+  in_app_enabled: boolean;
+  sms_enabled: boolean;
+  push_enabled: boolean;
+  disabled_categories: string[];
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface AdminDashboardMetrics {
+  active_users_count: number;
+  active_vendors_count: number;
+  active_drivers_count: number;
+  pending_category_approvals: number;
+  pending_catalog_approvals: number;
+  orders_by_status: Record<string, number>;
+  stuck_orders_count: number;
+  active_incidents_count: number;
+  failed_notification_jobs_count: number;
+  queued_notification_jobs_count: number;
+  generated_at: string;
+}
+
+export interface StuckOrderAlert {
+  opportunity_id: string;
+  title: string;
+  vendor_id: string;
+  vendor_name: string;
+  customer_id: string;
+  customer_name: string;
+  status: string;
+  duration_hours: number;
+  threshold_hours: number;
+  status_entered_at: string;
+  severity: string;
+  recommendation: string;
+}
+
+export interface AdminAuditLog {
+  id: string;
+  actor_id?: string;
+  actor_role: string;
+  action: string;
+  entity_type: string;
+  entity_id?: string;
+  previous_state?: any;
+  new_state?: any;
+  reason?: string;
+  metadata?: any;
+  created_at: string;
+}
+
+export async function getNotificationPreferences(): Promise<NotificationPreference | null> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/preferences`, { headers, cache: 'no-store' });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function updateNotificationPreferences(pref: Partial<NotificationPreference>): Promise<NotificationPreference | null> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/notifications/preferences`, {
+      method: 'PUT',
+      headers,
+      body: JSON.stringify(pref),
+    });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getFilteredNotifications(params: {
+  page?: number;
+  pageSize?: number;
+  type?: string;
+  unreadOnly?: boolean;
+}): Promise<{ notifications: UserNotification[]; total_count: number; page: number; page_size: number; unread_count: number }> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const q = new URLSearchParams();
+    if (params.page) q.set('page', params.page.toString());
+    if (params.pageSize) q.set('page_size', params.pageSize.toString());
+    if (params.type) q.set('type', params.type);
+    if (params.unreadOnly !== undefined) q.set('unread_only', params.unreadOnly ? 'true' : 'false');
+
+    const res = await fetch(`${API_BASE_URL}/notifications?${q.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return { notifications: [], total_count: 0, page: 1, page_size: 20, unread_count: 0 };
+    const json = await res.json();
+    const data = json.data;
+    if (data && data.notifications) {
+      return {
+        notifications: data.notifications || [],
+        total_count: data.total_count || 0,
+        page: data.page || 1,
+        page_size: data.page_size || 20,
+        unread_count: data.unread_count || 0,
+      };
+    }
+    return {
+      notifications: Array.isArray(data) ? data : [],
+      total_count: Array.isArray(data) ? data.length : 0,
+      page: 1,
+      page_size: 50,
+      unread_count: 0,
+    };
+  } catch {
+    return { notifications: [], total_count: 0, page: 1, page_size: 20, unread_count: 0 };
+  }
+}
+
+export async function getAdminOperationsMetrics(): Promise<AdminDashboardMetrics | null> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/operations/metrics`, { headers, cache: 'no-store' });
+    if (!res.ok) return null;
+    const json = await res.json();
+    return json.data || null;
+  } catch {
+    return null;
+  }
+}
+
+export async function getAdminStuckOrders(): Promise<StuckOrderAlert[]> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/operations/stuck-orders`, { headers, cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function getAdminAuditLogs(params?: {
+  entityType?: string;
+  actorId?: string;
+  limit?: number;
+  offset?: number;
+}): Promise<{ logs: AdminAuditLog[]; total: number; limit: number; offset: number }> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const q = new URLSearchParams();
+    if (params?.entityType) q.set('entity_type', params.entityType);
+    if (params?.actorId) q.set('actor_id', params.actorId);
+    if (params?.limit) q.set('limit', params.limit.toString());
+    if (params?.offset) q.set('offset', params.offset.toString());
+
+    const res = await fetch(`${API_BASE_URL}/admin/operations/audit-logs?${q.toString()}`, { headers, cache: 'no-store' });
+    if (!res.ok) return { logs: [], total: 0, limit: 20, offset: 0 };
+    const json = await res.json();
+    return {
+      logs: json.data?.logs || [],
+      total: json.data?.total || 0,
+      limit: json.data?.limit || 20,
+      offset: json.data?.offset || 0,
+    };
+  } catch {
+    return { logs: [], total: 0, limit: 20, offset: 0 };
+  }
+}
+
+export async function suspendVendor(vendorId: string, reason: string): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/vendors/${vendorId}/suspend`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function reactivateVendor(vendorId: string, reason = ''): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/vendors/${vendorId}/reactivate`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ reason }),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}
+
+export async function getAdminIncidents(): Promise<any[]> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = {};
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/operations/incidents`, { headers, cache: 'no-store' });
+    if (!res.ok) return [];
+    const json = await res.json();
+    return json.data || [];
+  } catch {
+    return [];
+  }
+}
+
+export async function actionAdminIncident(incidentId: string, payload: {
+  action: string;
+  handler_id?: string;
+  note?: string;
+  resolution_notes?: string;
+  replacement_vehicle_id?: string;
+  replacement_driver_id?: string;
+  resume_transit?: boolean;
+}): Promise<boolean> {
+  try {
+    const token = typeof window !== 'undefined' ? localStorage.getItem('uop_access_token') : null;
+    const headers: Record<string, string> = { 'Content-Type': 'application/json' };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    const res = await fetch(`${API_BASE_URL}/admin/operations/incidents/${incidentId}/action`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(payload),
+    });
+    return res.ok;
+  } catch {
+    return false;
+  }
+}

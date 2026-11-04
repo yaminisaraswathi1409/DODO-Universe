@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -12,6 +13,7 @@ import (
 	"github.com/uop/backend/internal/domain"
 	"github.com/uop/backend/internal/plugin"
 	"github.com/uop/backend/internal/repository/postgres"
+	"github.com/uop/backend/internal/spatial"
 )
 
 type subRepoInterface interface {
@@ -337,18 +339,45 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 		opp.Status = domain.StatusOrderPlaced
 		if opp.TargetVendorID != nil {
 			opp.AssignedUserID = opp.TargetVendorID
+			if s.userRepo != nil && *opp.TargetVendorID != uuid.Nil {
+				tv, vErr := s.userRepo.GetByID(ctx, *opp.TargetVendorID)
+				if vErr == nil && tv != nil && (tv.IsSuspended || tv.Status == domain.StatusSuspended) {
+					return nil, fmt.Errorf("vendor '%s' is currently suspended and cannot accept new orders", tv.FullName)
+				}
+			}
 		}
 
-		// Enforce Backend Minimum Order Quantity (MOQ) rule for Catalog Purchases
+		// Enforce Backend Minimum Order Quantity (MOQ) and Offering Eligibility rule for Catalog Purchases
 		if s.catalogRepo != nil && opp.CatalogItemID != nil && *opp.CatalogItemID != uuid.Nil {
 			item, cErr := s.catalogRepo.GetCatalogItemByID(ctx, *opp.CatalogItemID)
-			if cErr == nil && item != nil && item.MinOrderQuantity > 1 {
-				reqQty := 1.0
-				if opp.Quantity != nil && *opp.Quantity > 0 {
-					reqQty = *opp.Quantity
+			if cErr == nil && item != nil {
+				if s.userRepo != nil && item.VendorUserID != uuid.Nil {
+					iv, ivErr := s.userRepo.GetByID(ctx, item.VendorUserID)
+					if ivErr == nil && iv != nil && (iv.IsSuspended || iv.Status == domain.StatusSuspended) {
+						return nil, fmt.Errorf("vendor '%s' is currently suspended and cannot accept new orders", iv.FullName)
+					}
 				}
-				if reqQty < float64(item.MinOrderQuantity) {
-					return nil, fmt.Errorf("cannot place catalog order: requested quantity (%.0f) is below vendor's minimum order quantity (%d). Please use 'Request What You Need' for custom quantities.", reqQty, item.MinOrderQuantity)
+				// Prevent purchasing grouping nodes
+				if item.NodeType == "GROUPING" {
+					return nil, fmt.Errorf("cannot purchase a grouping catalog node. Grouping nodes are for organization only.")
+				}
+				// Prevent purchasing unapproved offerings
+				if item.Status != "" && item.Status != "ACTIVE_IN_CATALOG" && item.Status != "APPROVED" {
+					return nil, fmt.Errorf("cannot place catalog order: item is currently %s and not approved for purchase.", item.Status)
+				}
+				// Prevent quotation-only items from instant checkout
+				if item.PriceType == "QUOTATION" && opp.WorkflowModel == domain.WorkflowInstant {
+					return nil, fmt.Errorf("quotation-only offerings cannot be checked out via instant checkout. Please request a quote.")
+				}
+				// MOQ enforcement
+				if item.MinOrderQuantity > 1 {
+					reqQty := 1.0
+					if opp.Quantity != nil && *opp.Quantity > 0 {
+						reqQty = *opp.Quantity
+					}
+					if reqQty < float64(item.MinOrderQuantity) {
+						return nil, fmt.Errorf("cannot place catalog order: requested quantity (%.0f) is below vendor's minimum order quantity (%d). Please use 'Request What You Need' for custom quantities.", reqQty, item.MinOrderQuantity)
+					}
 				}
 			}
 		}
@@ -817,7 +846,255 @@ func (s *OpportunityService) CreateOpportunity(ctx context.Context, opp *domain.
 		}
 	}
 
+	// Trigger Traveller Commuter Route Matching & Notifications if eligible
+	if created.Type == domain.TypeNeed && s.oppRepo != nil {
+		_, _ = s.ProcessCommuterDeliveryMatches(ctx, created.ID)
+	}
+
 	return created, nil
+}
+
+// IsEligibleForCommuterDelivery checks whether an opportunity qualifies for traveller / commuter delivery matching.
+// Heavy freight / construction material categories (Scenario 1) and invalid types are strictly excluded.
+func (s *OpportunityService) IsEligibleForCommuterDelivery(opp *domain.Opportunity) (bool, string) {
+	if opp == nil {
+		return false, "opportunity is nil"
+	}
+	if opp.Type != domain.TypeNeed {
+		return false, "only customer Need requests qualify for commuter delivery"
+	}
+	if opp.AssignedUserID != nil {
+		return false, "opportunity is already assigned to a provider"
+	}
+
+	validStatuses := map[domain.OpportunityStatus]bool{
+		domain.StatusOpen:            true,
+		domain.StatusOpenNeed:        true,
+		domain.StatusPendingMatching: true,
+		"ORDER_PLACED":               true,
+	}
+	if !validStatuses[opp.Status] {
+		return false, fmt.Sprintf("ineligible status: %s", opp.Status)
+	}
+
+	// Scenario 1 Commercial / Heavy Construction Exclusions
+	var catSlug, catName string
+	if opp.Category != nil {
+		catSlug = strings.ToLower(opp.Category.Slug)
+		catName = strings.ToLower(opp.Category.Name)
+	}
+
+	ineligibleSlugs := map[string]bool{
+		"bricks-building-materials": true,
+		"cement-construction":      true,
+		"flatbed-transport":         true,
+		"equipment-machinery":       true,
+		"commercial-driver":         true,
+		"roadside-repair":           true,
+		"auto-parts-procurement":    true,
+	}
+	if ineligibleSlugs[catSlug] {
+		return false, fmt.Sprintf("category %s is dedicated to commercial freight / logistics cascade", catSlug)
+	}
+
+	// Metadata flags
+	var meta map[string]interface{}
+	if len(opp.Metadata) > 0 {
+		_ = json.Unmarshal(opp.Metadata, &meta)
+	}
+	if meta != nil {
+		if isBulk, ok := meta["is_heavy_freight"].(bool); ok && isBulk {
+			return false, "request is flagged as heavy freight"
+		}
+		if isCommuterReq, ok := meta["is_commuter_delivery"].(bool); ok && isCommuterReq {
+			return true, "explicitly flagged for commuter delivery"
+		}
+		if catSlugMeta, ok := meta["category_slug"].(string); ok && ineligibleSlugs[strings.ToLower(catSlugMeta)] {
+			return false, fmt.Sprintf("category_slug %s is heavy commercial freight", catSlugMeta)
+		}
+	}
+
+	// Explicit delivery order modes / workflows
+	if opp.OrderMode == domain.OrderModeJourney || opp.OrderMode == "DELIVERY" || opp.OrderMode == "COURIER" {
+		return true, "matching delivery order mode"
+	}
+	if opp.WorkflowModel == "PHARMACY_PICKUP" || opp.WorkflowModel == "PRESCRIPTION_VERIFICATION" || opp.WorkflowModel == "DELIVERY" {
+		return true, "matching delivery workflow model"
+	}
+
+	// Categories eligible for traveller delivery: Medicine, Healthcare, Groceries, Daily Essentials, Parcel Transport
+	if strings.Contains(catSlug, "medicine") || strings.Contains(catName, "medicine") ||
+		strings.Contains(catSlug, "pharmacy") || strings.Contains(catName, "pharmacy") ||
+		strings.Contains(catSlug, "healthcare") || strings.Contains(catName, "healthcare") ||
+		strings.Contains(catSlug, "grocery") || strings.Contains(catName, "grocery") ||
+		strings.Contains(catSlug, "food") || strings.Contains(catName, "food") ||
+		strings.Contains(catSlug, "essential") || strings.Contains(catName, "essential") ||
+		strings.Contains(catSlug, "courier") || strings.Contains(catName, "courier") {
+		return true, "eligible delivery category"
+	}
+
+	// Title / description keywords for delivery requests (e.g. "Medicine Delivery", "Urgent Grocery Pickup")
+	titleLower := strings.ToLower(opp.Title)
+	if strings.Contains(titleLower, "medicine") || strings.Contains(titleLower, "pharmacy") ||
+		strings.Contains(titleLower, "grocery") || strings.Contains(titleLower, "groceries") ||
+		strings.Contains(titleLower, "parcel") || strings.Contains(titleLower, "delivery") {
+		return true, "delivery title keywords"
+	}
+
+	return false, "request does not match traveller delivery criteria"
+}
+
+// HasResolvedPickupLocation checks if an opportunity has distinct, valid pickup coordinates.
+// If a custom delivery request has no resolved pickup coordinates or shop, it returns false.
+func (s *OpportunityService) HasResolvedPickupLocation(ctx context.Context, opp *domain.Opportunity) (bool, spatial.Coordinates, string) {
+	if opp == nil {
+		return false, spatial.Coordinates{}, "opportunity is nil"
+	}
+
+	var meta map[string]interface{}
+	if len(opp.Metadata) > 0 {
+		_ = json.Unmarshal(opp.Metadata, &meta)
+	}
+
+	var pLat, pLng float64
+	if meta != nil {
+		if plat, ok := meta["pickup_lat"].(float64); ok && plat != 0 {
+			pLat = plat
+		}
+		if plng, ok := meta["pickup_lng"].(float64); ok && plng != 0 {
+			pLng = plng
+		}
+	}
+
+	// If catalog item is linked, pickup can be resolved by repository from vendor_catalog_items
+	if (pLat == 0 || pLng == 0) && opp.CatalogItemID != nil && *opp.CatalogItemID != uuid.Nil {
+		return true, spatial.Coordinates{Lat: opp.Lat, Lng: opp.Lng}, "catalog item linked"
+	}
+
+	// If explicit pickup coordinates are present and valid
+	if pLat != 0 && pLng != 0 && pLat >= -90 && pLat <= 90 && pLng >= -180 && pLng <= 180 {
+		return true, spatial.Coordinates{Lat: pLat, Lng: pLng}, "valid pickup coordinates"
+	}
+
+	// If pickup location string is specified and distinct from customer delivery address
+	if meta != nil {
+		pickupLoc, _ := meta["pickup_location"].(string)
+		if pickupLoc == "" {
+			pickupLoc, _ = meta["source_location"].(string)
+		}
+		deliveryLoc, _ := meta["delivery_location"].(string)
+		if deliveryLoc == "" {
+			deliveryLoc, _ = meta["delivery_address"].(string)
+		}
+		if pickupLoc != "" && deliveryLoc != "" && !strings.EqualFold(pickupLoc, deliveryLoc) && opp.Lat != 0 && opp.Lng != 0 {
+			return true, spatial.Coordinates{Lat: opp.Lat, Lng: opp.Lng}, "distinct pickup location"
+		}
+	}
+
+	return false, spatial.Coordinates{}, "pickup location or shop has not been selected yet"
+}
+
+// ProcessCommuterDeliveryMatches finds candidate commuter journeys for an eligible delivery request,
+// saves the matches to opportunity_matches, and sends deduplicated notifications to eligible travellers.
+func (s *OpportunityService) ProcessCommuterDeliveryMatches(ctx context.Context, needID uuid.UUID) ([]*domain.CommuteMatchResult, error) {
+	if s.oppRepo == nil {
+		return nil, nil
+	}
+
+	opp, err := s.oppRepo.GetByID(ctx, needID)
+	if err != nil || opp == nil {
+		return nil, fmt.Errorf("need opportunity not found: %w", err)
+	}
+
+	// 1. Eligibility check
+	isEligible, _ := s.IsEligibleForCommuterDelivery(opp)
+	if !isEligible {
+		return nil, nil
+	}
+
+	// 2. Check if pickup location is resolved
+	hasPickup, _, pickupReason := s.HasResolvedPickupLocation(ctx, opp)
+	if !hasPickup {
+		// Do not pretend a shop has been selected; record status in metadata
+		var meta map[string]interface{}
+		if len(opp.Metadata) > 0 {
+			_ = json.Unmarshal(opp.Metadata, &meta)
+		}
+		if meta == nil {
+			meta = make(map[string]interface{})
+		}
+		meta["pickup_resolved"] = false
+		meta["matching_pending_reason"] = pickupReason
+		if metaBytes, err := json.Marshal(meta); err == nil {
+			_ = s.oppRepo.UpdateMetadata(ctx, opp.ID, metaBytes)
+		}
+		return nil, nil
+	}
+
+	// 3. Find candidate commuter route matches using Phase B matching engine
+	matches, err := s.oppRepo.FindCommuterRouteMatches(ctx, needID, 25000.0)
+	if err != nil {
+		return nil, fmt.Errorf("failed to find commuter matches: %w", err)
+	}
+
+	if len(matches) == 0 {
+		return matches, nil
+	}
+
+	// 4. For each candidate match, save match record and dispatch deduplicated notification
+	for _, m := range matches {
+		if m.ProviderID == opp.UserID {
+			continue // Exclude customer
+		}
+
+		// Save match record in opportunity_matches
+		notes := fmt.Sprintf("Detour: %.1f km (%d min) via %s", m.TotalDetourMeters/1000.0, m.EstimatedDetourMin, m.TravelMode)
+		quoteAmount := float64(m.EstimatedPayoutCents) / 100.0
+		_ = s.oppRepo.SaveOpportunityMatchWithDetails(ctx, m.NeedID, m.ProviderID, "NOTIFIED", m.TotalDetourMeters, quoteAmount, notes)
+
+		if s.userRepo != nil {
+			// Format sanitized, privacy-safe notification
+			// Do NOT expose prescription contents, private house numbers, phone numbers
+			cleanPickup := m.PickupAddress
+			if cleanPickup == "" {
+				cleanPickup = "Designated Pickup Point"
+			}
+			cleanDrop := m.DeliveryAddress
+			if cleanDrop == "" {
+				cleanDrop = "Destination Area"
+			}
+
+			notifMsg := fmt.Sprintf("Delivery opportunity along your route (%s to %s). Approx detour: %.1f km (%d min). Proposed compensation: %s.",
+				m.OriginAddress, m.DestinationAddress, m.TotalDetourMeters/1000.0, m.EstimatedDetourMin, m.FormattedPayout)
+
+			dedupeKey := fmt.Sprintf("commute_match_%s_%s", m.NeedID, m.ProviderID)
+
+			notifMeta, _ := json.Marshal(map[string]interface{}{
+				"opportunity_id":  m.NeedID,
+				"journey_id":      m.OfferID,
+				"type":            "COMMUTE_DELIVERY_OFFER",
+				"offer_title":     m.OfferTitle,
+				"detour_km":       math.Round((m.TotalDetourMeters/1000.0)*10) / 10,
+				"detour_min":      m.EstimatedDetourMin,
+				"payout":          m.FormattedPayout,
+				"travel_mode":     m.TravelMode,
+				"pickup_area":     cleanPickup,
+				"delivery_area":   cleanDrop,
+				"dedupe_key":      dedupeKey,
+				"action_required": "OPTIONAL_ACCEPT",
+			})
+
+			_, _, _ = s.userRepo.CreateNotificationIdempotent(ctx, &domain.Notification{
+				UserID:   m.ProviderID,
+				Title:    "Delivery Opportunity Along Your Route",
+				Message:  notifMsg,
+				Type:     "COMMUTE_DELIVERY_OFFER",
+				Metadata: notifMeta,
+			}, dedupeKey)
+		}
+	}
+
+	return matches, nil
 }
 
 func (s *OpportunityService) GetOpportunity(ctx context.Context, id uuid.UUID) (*domain.Opportunity, error) {
@@ -992,6 +1269,14 @@ func (s *OpportunityService) AcceptOpportunity(ctx context.Context, oppID uuid.U
 	opp, err := s.oppRepo.GetByID(ctx, oppID)
 	if err != nil || opp == nil {
 		return fmt.Errorf("opportunity not found")
+	}
+
+	// Vendor suspension check
+	if s.userRepo != nil && providerUserID != uuid.Nil {
+		prov, pErr := s.userRepo.GetByID(ctx, providerUserID)
+		if pErr == nil && prov != nil && (prov.IsSuspended || prov.Status == domain.StatusSuspended) {
+			return fmt.Errorf("vendor account is currently suspended and cannot accept orders")
+		}
 	}
 
 	if opp.AssignedUserID != nil && *opp.AssignedUserID != providerUserID {
@@ -1366,4 +1651,335 @@ func (s *OpportunityService) ConfirmResources(ctx context.Context, params Confir
 	}
 
 	return opp, nil
+}
+
+// -----------------------------------------------------------------------------
+// JOURNEY SERVICE METHODS (Phase A)
+// -----------------------------------------------------------------------------
+
+// RegisterJourney validates and registers a new travel route for an ordinary user
+func (s *OpportunityService) RegisterJourney(ctx context.Context, userID uuid.UUID, req *domain.RegisterJourneyRequest) (*domain.UserJourney, error) {
+	if userID == uuid.Nil {
+		return nil, fmt.Errorf("user ID is required")
+	}
+
+	// 1. Validate addresses
+	originAddr := strings.TrimSpace(req.OriginAddress)
+	if originAddr == "" {
+		return nil, fmt.Errorf("origin address is required")
+	}
+	destAddr := strings.TrimSpace(req.DestinationAddress)
+	if destAddr == "" {
+		return nil, fmt.Errorf("destination address is required")
+	}
+
+	// 2. Validate coordinates
+	if req.OriginLat < -90.0 || req.OriginLat > 90.0 || req.OriginLng < -180.0 || req.OriginLng > 180.0 {
+		return nil, fmt.Errorf("invalid origin coordinates")
+	}
+	if req.DestinationLat < -90.0 || req.DestinationLat > 90.0 || req.DestinationLng < -180.0 || req.DestinationLng > 180.0 {
+		return nil, fmt.Errorf("invalid destination coordinates")
+	}
+
+	// 3. Normalize travel mode
+	travelMode := strings.ToUpper(strings.TrimSpace(req.TravelMode))
+	if travelMode == "" {
+		travelMode = "BIKE"
+	}
+
+	// 4. Validate and normalize recurrence
+	journeyType := strings.ToUpper(strings.TrimSpace(req.JourneyType))
+	if journeyType != "RECURRING" {
+		journeyType = "ONE_TIME"
+	}
+
+	travelFreq := strings.ToUpper(strings.TrimSpace(req.TravelFrequency))
+	if travelFreq == "" {
+		if journeyType == "RECURRING" {
+			travelFreq = "DAILY"
+		} else {
+			travelFreq = "ONE_TIME"
+		}
+	}
+
+	days := req.AvailableDays
+	if journeyType == "RECURRING" && len(days) == 0 {
+		switch travelFreq {
+		case "WEEKDAYS":
+			days = []string{"MON", "TUE", "WED", "THU", "FRI"}
+		case "WEEKENDS":
+			days = []string{"SAT", "SUN"}
+		default: // DAILY
+			days = []string{"MON", "TUE", "WED", "THU", "FRI", "SAT", "SUN"}
+		}
+	}
+
+	// 5. Detour limits validation
+	maxDetourKM := req.MaxDetourKM
+	if maxDetourKM <= 0 {
+		maxDetourKM = 3.0 // default 3 km
+	} else if maxDetourKM > 50.0 {
+		return nil, fmt.Errorf("maximum acceptable detour cannot exceed 50 km")
+	}
+
+	maxDetourMin := req.MaxDetourMinutes
+	if maxDetourMin <= 0 {
+		maxDetourMin = 15 // default 15 min
+	} else if maxDetourMin > 180 {
+		return nil, fmt.Errorf("maximum acceptable detour time cannot exceed 180 minutes")
+	}
+
+	// 6. Construct Opportunity metadata
+	metaMap := map[string]interface{}{
+		"is_journey":             true,
+		"is_active":              true,
+		"origin_address":         originAddr,
+		"origin_lat":             req.OriginLat,
+		"origin_lng":             req.OriginLng,
+		"destination_address":    destAddr,
+		"destination":            destAddr,
+		"destination_lat":        req.DestinationLat,
+		"destination_lng":        req.DestinationLng,
+		"travel_mode":            travelMode,
+		"journey_type":           journeyType,
+		"travel_frequency":       travelFreq,
+		"available_days":         days,
+		"departure_window_start": strings.TrimSpace(req.DepartureWindowStart),
+		"departure_window_end":   strings.TrimSpace(req.DepartureWindowEnd),
+		"arrival_window_start":   strings.TrimSpace(req.ArrivalWindowStart),
+		"arrival_window_end":     strings.TrimSpace(req.ArrivalWindowEnd),
+		"max_detour_km":          maxDetourKM,
+		"max_detour_minutes":     maxDetourMin,
+	}
+	metaBytes, err := json.Marshal(metaMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode journey metadata: %w", err)
+	}
+
+	// 7. Title & Description
+	title := fmt.Sprintf("Journey: %s → %s", originAddr, destAddr)
+	desc := fmt.Sprintf("%s travel via %s (Max Detour: %.1f km)", travelFreq, travelMode, maxDetourKM)
+
+	wf := domain.WorkflowInstant
+	if journeyType == "RECURRING" {
+		wf = domain.WorkflowScheduled
+	}
+
+	opp := &domain.Opportunity{
+		UserID:        userID,
+		Type:          domain.TypeOffer,
+		OrderMode:     domain.OrderModeJourney,
+		Title:         title,
+		Description:   desc,
+		WorkflowModel: wf,
+		Status:        domain.StatusOpen,
+		Lat:           req.OriginLat,
+		Lng:           req.OriginLng,
+		AddressText:   originAddr,
+		RadiusKM:      maxDetourKM,
+		Metadata:      metaBytes,
+	}
+
+	createdOpp, err := s.oppRepo.Create(ctx, opp)
+	if err != nil {
+		return nil, fmt.Errorf("failed to save journey: %w", err)
+	}
+
+	// 8. Return mapped UserJourney
+	return &domain.UserJourney{
+		ID:                   createdOpp.ID,
+		UserID:               userID,
+		Title:                createdOpp.Title,
+		Description:          createdOpp.Description,
+		Status:               string(createdOpp.Status),
+		OriginAddress:        originAddr,
+		OriginLat:            req.OriginLat,
+		OriginLng:            req.OriginLng,
+		DestinationAddress:   destAddr,
+		DestinationLat:       req.DestinationLat,
+		DestinationLng:       req.DestinationLng,
+		TravelMode:           travelMode,
+		JourneyType:          journeyType,
+		TravelFrequency:      travelFreq,
+		AvailableDays:        days,
+		DepartureWindowStart: strings.TrimSpace(req.DepartureWindowStart),
+		DepartureWindowEnd:   strings.TrimSpace(req.DepartureWindowEnd),
+		ArrivalWindowStart:   strings.TrimSpace(req.ArrivalWindowStart),
+		ArrivalWindowEnd:     strings.TrimSpace(req.ArrivalWindowEnd),
+		MaxDetourKM:          maxDetourKM,
+		MaxDetourMinutes:     maxDetourMin,
+		IsActive:             true,
+		CreatedAt:            createdOpp.CreatedAt,
+		UpdatedAt:            createdOpp.UpdatedAt,
+	}, nil
+}
+
+// ListUserJourneys returns all active or paused journeys for the specified user
+func (s *OpportunityService) ListUserJourneys(ctx context.Context, userID uuid.UUID) ([]*domain.UserJourney, error) {
+	if userID == uuid.Nil {
+		return nil, fmt.Errorf("user ID is required")
+	}
+	return s.oppRepo.GetUserJourneys(ctx, userID)
+}
+
+// GetJourney retrieves a journey with strict user ownership validation
+func (s *OpportunityService) GetJourney(ctx context.Context, id, userID uuid.UUID) (*domain.UserJourney, error) {
+	if id == uuid.Nil || userID == uuid.Nil {
+		return nil, fmt.Errorf("journey ID and user ID are required")
+	}
+	return s.oppRepo.GetJourneyByID(ctx, id, userID)
+}
+
+// UpdateJourney validates and updates journey settings with ownership check
+func (s *OpportunityService) UpdateJourney(ctx context.Context, id, userID uuid.UUID, req *domain.UpdateJourneyRequest) (*domain.UserJourney, error) {
+	if id == uuid.Nil || userID == uuid.Nil {
+		return nil, fmt.Errorf("journey ID and user ID are required")
+	}
+
+	existing, err := s.oppRepo.GetJourneyByID(ctx, id, userID)
+	if err != nil {
+		return nil, fmt.Errorf("journey not found or unauthorized: %w", err)
+	}
+
+	// Apply updates with fallback to existing values
+	originAddr := existing.OriginAddress
+	if req.OriginAddress != "" {
+		originAddr = strings.TrimSpace(req.OriginAddress)
+	}
+	destAddr := existing.DestinationAddress
+	if req.DestinationAddress != "" {
+		destAddr = strings.TrimSpace(req.DestinationAddress)
+	}
+
+	originLat := existing.OriginLat
+	originLng := existing.OriginLng
+	if req.OriginLat != 0 || req.OriginLng != 0 {
+		if req.OriginLat < -90.0 || req.OriginLat > 90.0 || req.OriginLng < -180.0 || req.OriginLng > 180.0 {
+			return nil, fmt.Errorf("invalid origin coordinates")
+		}
+		originLat = req.OriginLat
+		originLng = req.OriginLng
+	}
+
+	destLat := existing.DestinationLat
+	destLng := existing.DestinationLng
+	if req.DestinationLat != 0 || req.DestinationLng != 0 {
+		if req.DestinationLat < -90.0 || req.DestinationLat > 90.0 || req.DestinationLng < -180.0 || req.DestinationLng > 180.0 {
+			return nil, fmt.Errorf("invalid destination coordinates")
+		}
+		destLat = req.DestinationLat
+		destLng = req.DestinationLng
+	}
+
+	travelMode := existing.TravelMode
+	if req.TravelMode != "" {
+		travelMode = strings.ToUpper(strings.TrimSpace(req.TravelMode))
+	}
+
+	journeyType := existing.JourneyType
+	if req.JourneyType != "" {
+		journeyType = strings.ToUpper(strings.TrimSpace(req.JourneyType))
+	}
+
+	travelFreq := existing.TravelFrequency
+	if req.TravelFrequency != "" {
+		travelFreq = strings.ToUpper(strings.TrimSpace(req.TravelFrequency))
+	}
+
+	days := existing.AvailableDays
+	if len(req.AvailableDays) > 0 {
+		days = req.AvailableDays
+	}
+
+	maxDetourKM := existing.MaxDetourKM
+	if req.MaxDetourKM > 0 {
+		if req.MaxDetourKM > 50.0 {
+			return nil, fmt.Errorf("maximum acceptable detour cannot exceed 50 km")
+		}
+		maxDetourKM = req.MaxDetourKM
+	}
+
+	maxDetourMin := existing.MaxDetourMinutes
+	if req.MaxDetourMinutes > 0 {
+		if req.MaxDetourMinutes > 180 {
+			return nil, fmt.Errorf("maximum acceptable detour time cannot exceed 180 minutes")
+		}
+		maxDetourMin = req.MaxDetourMinutes
+	}
+
+	depStart := existing.DepartureWindowStart
+	if req.DepartureWindowStart != "" {
+		depStart = strings.TrimSpace(req.DepartureWindowStart)
+	}
+	depEnd := existing.DepartureWindowEnd
+	if req.DepartureWindowEnd != "" {
+		depEnd = strings.TrimSpace(req.DepartureWindowEnd)
+	}
+
+	arrStart := existing.ArrivalWindowStart
+	if req.ArrivalWindowStart != "" {
+		arrStart = strings.TrimSpace(req.ArrivalWindowStart)
+	}
+	arrEnd := existing.ArrivalWindowEnd
+	if req.ArrivalWindowEnd != "" {
+		arrEnd = strings.TrimSpace(req.ArrivalWindowEnd)
+	}
+
+	metaMap := map[string]interface{}{
+		"is_journey":             true,
+		"is_active":              existing.IsActive,
+		"origin_address":         originAddr,
+		"origin_lat":             originLat,
+		"origin_lng":             originLng,
+		"destination_address":    destAddr,
+		"destination":            destAddr,
+		"destination_lat":        destLat,
+		"destination_lng":        destLng,
+		"travel_mode":            travelMode,
+		"journey_type":           journeyType,
+		"travel_frequency":       travelFreq,
+		"available_days":         days,
+		"departure_window_start": depStart,
+		"departure_window_end":   depEnd,
+		"arrival_window_start":   arrStart,
+		"arrival_window_end":     arrEnd,
+		"max_detour_km":          maxDetourKM,
+		"max_detour_minutes":     maxDetourMin,
+	}
+	metaBytes, err := json.Marshal(metaMap)
+	if err != nil {
+		return nil, fmt.Errorf("failed to encode metadata: %w", err)
+	}
+
+	title := fmt.Sprintf("Journey: %s → %s", originAddr, destAddr)
+	desc := fmt.Sprintf("%s travel via %s (Max Detour: %.1f km)", travelFreq, travelMode, maxDetourKM)
+
+	return s.oppRepo.UpdateJourney(ctx, id, userID, title, desc, originAddr, originLat, originLng, maxDetourKM, metaBytes)
+}
+
+// SetJourneyStatus handles pause, resume, and cancellation of registered journeys
+func (s *OpportunityService) SetJourneyStatus(ctx context.Context, id, userID uuid.UUID, action string) error {
+	if id == uuid.Nil || userID == uuid.Nil {
+		return fmt.Errorf("journey ID and user ID are required")
+	}
+
+	action = strings.ToUpper(strings.TrimSpace(action))
+	var targetStatus domain.OpportunityStatus
+	var isActive bool
+
+	switch action {
+	case "PAUSE":
+		targetStatus = domain.StatusPaused
+		isActive = false
+	case "RESUME":
+		targetStatus = domain.StatusOpen
+		isActive = true
+	case "CANCEL":
+		targetStatus = domain.StatusCancelled
+		isActive = false
+	default:
+		return fmt.Errorf("invalid action '%s': must be PAUSE, RESUME, or CANCEL", action)
+	}
+
+	return s.oppRepo.UpdateJourneyStatus(ctx, id, userID, targetStatus, isActive)
 }

@@ -68,7 +68,12 @@ export default function UserSignupPage() {
       setDemoOtp(devCode);
       setStep('OTP');
     } catch (err: any) {
-      setError(err.message || 'Failed to create signup invitation. Please try again.');
+      const msg = err.message || '';
+      if (msg.includes('Failed to fetch') || msg.includes('NetworkError') || msg.includes('ERR_CONNECTION_REFUSED')) {
+        setError('Backend server is not running or unreachable at port 8080. Please ensure the backend is started.');
+      } else {
+        setError(msg || 'Failed to create signup account. Please try again.');
+      }
     } finally {
       setLoading(false);
     }
