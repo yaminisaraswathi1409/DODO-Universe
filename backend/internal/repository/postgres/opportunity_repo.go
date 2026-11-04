@@ -5,12 +5,15 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/uop/backend/internal/domain"
+	"github.com/uop/backend/internal/spatial"
 )
 
 type OpportunityRepository struct {
@@ -385,6 +388,359 @@ func (r *OpportunityRepository) GetStatusHistory(ctx context.Context, opportunit
 	return history, nil
 }
 
+// MaskPhone masks private phone digits for public match previews (e.g. +91 99**** 9999)
+func MaskPhone(phone string) string {
+	phone = strings.TrimSpace(phone)
+	if len(phone) < 6 {
+		return phone
+	}
+	if len(phone) <= 10 {
+		return phone[:2] + "****" + phone[len(phone)-4:]
+	}
+	return phone[:6] + "****" + phone[len(phone)-4:]
+}
+
+// parseTimeToMinutes parses times like "08:00 AM", "8:30 PM", or "14:30" into minutes from midnight (0..1439)
+func parseTimeToMinutes(timeStr string) (int, bool) {
+	timeStr = strings.TrimSpace(strings.ToUpper(timeStr))
+	if timeStr == "" {
+		return 0, false
+	}
+	var hour, minute int
+	var meridian string
+	n, err := fmt.Sscanf(timeStr, "%d:%d %s", &hour, &minute, &meridian)
+	if err == nil && n == 3 {
+		if meridian == "PM" && hour < 12 {
+			hour += 12
+		} else if meridian == "AM" && hour == 12 {
+			hour = 0
+		}
+		return hour*60 + minute, true
+	}
+
+	n, err = fmt.Sscanf(timeStr, "%d:%d%s", &hour, &minute, &meridian)
+	if err == nil && n >= 2 {
+		if meridian == "PM" && hour < 12 {
+			hour += 12
+		} else if meridian == "AM" && hour == 12 {
+			hour = 0
+		}
+		return hour*60 + minute, true
+	}
+
+	n, err = fmt.Sscanf(timeStr, "%d:%d", &hour, &minute)
+	if err == nil && n == 2 {
+		return hour*60 + minute, true
+	}
+
+	return 0, false
+}
+
+func getFloat(m map[string]interface{}, key string) float64 {
+	if m == nil {
+		return 0
+	}
+	val, exists := m[key]
+	if !exists || val == nil {
+		return 0
+	}
+	switch v := val.(type) {
+	case float64:
+		return v
+	case float32:
+		return float64(v)
+	case int:
+		return float64(v)
+	case int64:
+		return float64(v)
+	case string:
+		v = strings.TrimSpace(v)
+		if f, err := strconv.ParseFloat(v, 64); err == nil {
+			return f
+		}
+	}
+	return 0
+}
+
+func getString(m map[string]interface{}, key string) string {
+	if m == nil {
+		return ""
+	}
+	val, exists := m[key]
+	if !exists || val == nil {
+		return ""
+	}
+	if s, ok := val.(string); ok {
+		return strings.TrimSpace(s)
+	}
+	return fmt.Sprintf("%v", val)
+}
+
+func getStringSlice(m map[string]interface{}, key string) []string {
+	if m == nil {
+		return nil
+	}
+	val, exists := m[key]
+	if !exists || val == nil {
+		return nil
+	}
+	if rawList, ok := val.([]interface{}); ok {
+		var res []string
+		for _, item := range rawList {
+			if s, ok := item.(string); ok && s != "" {
+				res = append(res, strings.ToUpper(strings.TrimSpace(s)))
+			}
+		}
+		return res
+	}
+	if strList, ok := val.([]string); ok {
+		var res []string
+		for _, s := range strList {
+			if s != "" {
+				res = append(res, strings.ToUpper(strings.TrimSpace(s)))
+			}
+		}
+		return res
+	}
+	return nil
+}
+
+func isValidCoord(lat, lng float64) bool {
+	if lat < -90.0 || lat > 90.0 || lng < -180.0 || lng > 180.0 {
+		return false
+	}
+	if lat == 0.0 && lng == 0.0 {
+		return false
+	}
+	return true
+}
+
+// EvaluateCommuteMatch evaluates whether a candidate journey offer matches a customer delivery need.
+// It enforces order mode, directionality, maximum detour tolerances, and schedule constraints.
+func EvaluateCommuteMatch(
+	need *domain.Opportunity,
+	pickupCoord spatial.Coordinates,
+	deliveryCoord spatial.Coordinates,
+	pickupAddr string,
+	deliveryAddr string,
+	journey *domain.Opportunity,
+	journeyMeta map[string]interface{},
+	candidateUser *domain.User,
+	radiusMeters float64,
+) (*domain.CommuteMatchResult, bool) {
+	if need == nil || journey == nil {
+		return nil, false
+	}
+
+	// 0. Enforce customer need eligibility
+	if need.AssignedUserID != nil {
+		return nil, false
+	}
+	if need.Status == domain.StatusCompleted || need.Status == domain.StatusCancelled || need.Status == "EXPIRED" {
+		return nil, false
+	}
+	if !isValidCoord(pickupCoord.Lat, pickupCoord.Lng) || !isValidCoord(deliveryCoord.Lat, deliveryCoord.Lng) {
+		return nil, false
+	}
+
+	// 1. Match only genuine registered journeys
+	if journey.Type != domain.TypeOffer {
+		return nil, false
+	}
+	isJourneyMode := journey.OrderMode == domain.OrderModeJourney || getString(journeyMeta, "is_journey") == "true"
+	if !isJourneyMode {
+		return nil, false
+	}
+
+	// 2. Exclude paused and cancelled journeys
+	if journey.Status == domain.StatusPaused || journey.Status == domain.StatusCancelled {
+		return nil, false
+	}
+	if journey.Status != domain.StatusOpen && journey.Status != "PENDING_MATCHING" && journey.Status != "ACTIVE" {
+		return nil, false
+	}
+	if isAct, ok := journeyMeta["is_active"].(bool); ok && !isAct {
+		return nil, false
+	}
+	if getString(journeyMeta, "is_active") == "false" {
+		return nil, false
+	}
+
+	// Prevent user matching their own need
+	if journey.UserID == need.UserID {
+		return nil, false
+	}
+
+	// 3. Extract and validate journey Origin and Destination coordinates
+	originLat := journey.Lat
+	originLng := journey.Lng
+	if !isValidCoord(originLat, originLng) {
+		originLat = getFloat(journeyMeta, "origin_lat")
+		originLng = getFloat(journeyMeta, "origin_lng")
+	}
+	if !isValidCoord(originLat, originLng) {
+		return nil, false
+	}
+
+	destLat := getFloat(journeyMeta, "destination_lat")
+	destLng := getFloat(journeyMeta, "destination_lng")
+	if !isValidCoord(destLat, destLng) {
+		return nil, false
+	}
+
+	originCoord := spatial.Coordinates{Lat: originLat, Lng: originLng}
+	destCoord := spatial.Coordinates{Lat: destLat, Lng: destLng}
+
+	// Baseline commute distance
+	baselineDist := spatial.HaversineDistance(originCoord, destCoord)
+	if baselineDist < 100.0 { // Origin and destination virtually identical
+		return nil, false
+	}
+
+	// 4. Directionality verification:
+	// Delivery must progress forward along the traveller's corridor vector (Origin -> Destination).
+	tPickup := spatial.RouteProgressProjection(pickupCoord, originCoord, destCoord)
+	tDrop := spatial.RouteProgressProjection(deliveryCoord, originCoord, destCoord)
+
+	// If drop-off projection is behind pickup projection, it's travelling in the wrong / reverse direction.
+	if tDrop < tPickup-0.05 {
+		return nil, false
+	}
+
+	// 5. Corridor Detour and Lateral Offset calculation
+	addedDetour, pickupCorridor, dropCorridor := spatial.CalculateCommuteDetour(originCoord, destCoord, pickupCoord, deliveryCoord)
+
+	// Enforce individual journey detour tolerance limit
+	maxDetourKM := getFloat(journeyMeta, "max_detour_km")
+	if maxDetourKM <= 0 {
+		maxDetourKM = journey.RadiusKM
+	}
+	if maxDetourKM <= 0 {
+		maxDetourKM = 5.0 // Default 5 km tolerance
+	}
+	maxDetourMeters := maxDetourKM * 1000.0
+
+	// If total added detour or corridor offset exceeds tolerance, reject
+	if addedDetour > maxDetourMeters {
+		return nil, false
+	}
+	if pickupCorridor > maxDetourMeters || dropCorridor > maxDetourMeters {
+		return nil, false
+	}
+
+	// 6. Schedule and Timing Window Verification
+	if need.ScheduledStart != nil && !need.ScheduledStart.IsZero() {
+		ist := time.FixedZone("IST", 5*3600+30*60)
+		reqDate := need.ScheduledStart.In(ist)
+		reqDay := strings.ToUpper(reqDate.Format("Mon"))
+
+		travelFreq := strings.ToUpper(getString(journeyMeta, "travel_frequency"))
+		if travelFreq == "WEEKDAYS" && (reqDay == "SAT" || reqDay == "SUN") {
+			return nil, false
+		}
+		if travelFreq == "WEEKENDS" && (reqDay != "SAT" && reqDay != "SUN") {
+			return nil, false
+		}
+
+		days := getStringSlice(journeyMeta, "available_days")
+		if len(days) > 0 {
+			matchedDay := false
+			for _, d := range days {
+				if strings.EqualFold(d, reqDay) || strings.HasPrefix(strings.ToUpper(d), reqDay) {
+					matchedDay = true
+					break
+				}
+			}
+			if !matchedDay && travelFreq != "DAILY" {
+				return nil, false
+			}
+		}
+
+		// Departure window check
+		depStartStr := getString(journeyMeta, "departure_window_start")
+		depEndStr := getString(journeyMeta, "departure_window_end")
+		depStartMin, hasStart := parseTimeToMinutes(depStartStr)
+		depEndMin, hasEnd := parseTimeToMinutes(depEndStr)
+
+		if hasStart || hasEnd {
+			reqMin := reqDate.Hour()*60 + reqDate.Minute()
+			// Allow 60-minute window margin
+			if hasStart && reqMin < depStartMin-60 {
+				return nil, false
+			}
+			if hasEnd && reqMin > depEndMin+60 {
+				return nil, false
+			}
+		}
+	}
+
+	// 7. Format Payout and Estimated Detour Time
+	detourMin := int(math.Ceil(addedDetour / 500.0))
+	if detourMin < 1 {
+		detourMin = 1
+	}
+
+	payoutCents := 4000 // Default ₹40.00
+	if need.BudgetMax != nil && *need.BudgetMax > 0 {
+		payoutCents = int(*need.BudgetMax * 100)
+	} else if journey.BudgetMax != nil && *journey.BudgetMax > 0 {
+		payoutCents = int(*journey.BudgetMax * 100)
+	}
+
+	originAddr := journey.AddressText
+	if oaddr := getString(journeyMeta, "origin_address"); oaddr != "" {
+		originAddr = oaddr
+	}
+	destAddr := originAddr
+	if daddr := getString(journeyMeta, "destination_address"); daddr != "" {
+		destAddr = daddr
+	} else if daddr := getString(journeyMeta, "destination"); daddr != "" {
+		destAddr = daddr
+	}
+
+	travelFreq := "DAILY"
+	if tf := getString(journeyMeta, "travel_frequency"); tf != "" {
+		travelFreq = tf
+	}
+	travelMode := "BIKE"
+	if tm := getString(journeyMeta, "travel_mode"); tm != "" {
+		travelMode = tm
+	}
+
+	// Privacy protection: exclude private street address and mask phone number
+	var maskedProvider *domain.User
+	if candidateUser != nil {
+		maskedProvider = &domain.User{
+			ID:         candidateUser.ID,
+			FullName:   candidateUser.FullName,
+			Phone:      MaskPhone(candidateUser.Phone),
+			AvatarURL:  candidateUser.AvatarURL,
+			TrustScore: candidateUser.TrustScore,
+		}
+	}
+
+	return &domain.CommuteMatchResult{
+		OfferID:              journey.ID,
+		NeedID:               need.ID,
+		ProviderID:           journey.UserID,
+		Provider:             maskedProvider,
+		OfferTitle:           journey.Title,
+		OriginAddress:        originAddr,
+		DestinationAddress:   destAddr,
+		PickupAddress:        pickupAddr,
+		DeliveryAddress:      deliveryAddr,
+		PickupDetourMeters:   pickupCorridor,
+		DeliveryDetourMeters: dropCorridor,
+		TotalDetourMeters:    addedDetour,
+		EstimatedDetourMin:   detourMin,
+		EstimatedPayoutCents: payoutCents,
+		FormattedPayout:      fmt.Sprintf("₹%.0f", float64(payoutCents)/100.0),
+		TravelMode:           travelMode,
+		TravelFrequency:      travelFreq,
+		CreatedAt:            journey.CreatedAt,
+	}, true
+}
+
 // FindCommuterRouteMatches finds active commuter Offer listings matching a target customer Need route via PostGIS
 func (r *OpportunityRepository) FindCommuterRouteMatches(ctx context.Context, needID uuid.UUID, radiusMeters float64) ([]*domain.CommuteMatchResult, error) {
 	if radiusMeters <= 0 {
@@ -397,6 +753,25 @@ func (r *OpportunityRepository) FindCommuterRouteMatches(ctx context.Context, ne
 		return nil, fmt.Errorf("need opportunity not found: %w", err)
 	}
 
+	// Validate need eligibility
+	if need.Type != domain.TypeNeed {
+		return []*domain.CommuteMatchResult{}, nil
+	}
+	if need.AssignedUserID != nil {
+		return []*domain.CommuteMatchResult{}, nil
+	}
+	validStatuses := map[domain.OpportunityStatus]bool{
+		domain.StatusOpen:            true,
+		domain.StatusOpenNeed:        true,
+		domain.StatusPendingMatching: true,
+		"ORDER_PLACED":               true,
+		domain.StatusInProgress:      true,
+	}
+	if !validStatuses[need.Status] {
+		return []*domain.CommuteMatchResult{}, nil
+	}
+
+	// 2. Extract and resolve Need coordinates (Pickup & Delivery)
 	pickupLat := need.Lat
 	pickupLng := need.Lng
 	pickupAddr := need.AddressText
@@ -405,49 +780,76 @@ func (r *OpportunityRepository) FindCommuterRouteMatches(ctx context.Context, ne
 	deliveryLng := need.Lng
 	deliveryAddr := need.AddressText
 
-	// Check if Need metadata specifies custom pickup/delivery points
 	var needMeta map[string]interface{}
 	if len(need.Metadata) > 0 {
 		_ = json.Unmarshal(need.Metadata, &needMeta)
 	}
 
 	if needMeta != nil {
-		if plat, ok := needMeta["pickup_lat"].(float64); ok {
+		if plat := getFloat(needMeta, "pickup_lat"); plat != 0 {
 			pickupLat = plat
 		}
-		if plng, ok := needMeta["pickup_lng"].(float64); ok {
+		if plng := getFloat(needMeta, "pickup_lng"); plng != 0 {
 			pickupLng = plng
 		}
-		if paddr, ok := needMeta["pickup_location"].(string); ok && paddr != "" {
+		if paddr := getString(needMeta, "pickup_location"); paddr != "" {
 			pickupAddr = paddr
+		} else if saddr := getString(needMeta, "source_location"); saddr != "" {
+			pickupAddr = saddr
 		}
 
-		if dlat, ok := needMeta["delivery_lat"].(float64); ok {
+		if dlat := getFloat(needMeta, "delivery_lat"); dlat != 0 {
 			deliveryLat = dlat
 		}
-		if dlng, ok := needMeta["delivery_lng"].(float64); ok {
+		if dlng := getFloat(needMeta, "delivery_lng"); dlng != 0 {
 			deliveryLng = dlng
 		}
-		if daddr, ok := needMeta["delivery_location"].(string); ok && daddr != "" {
+		if daddr := getString(needMeta, "delivery_location"); daddr != "" {
+			deliveryAddr = daddr
+		} else if daddr := getString(needMeta, "delivery_address"); daddr != "" {
 			deliveryAddr = daddr
 		}
 	}
 
-	// 2. Query active commuter OFFER listings
+	// Resolve pickup from catalog item if linked and pickup coordinates were not specified
+	if need.CatalogItemID != nil && (pickupLat == deliveryLat && pickupLng == deliveryLng) {
+		var cLat, cLng float64
+		var cAddr string
+		catQuery := `SELECT COALESCE(ST_Y(pickup_location::geometry), 0), COALESCE(ST_X(pickup_location::geometry), 0), COALESCE(pickup_address, '') FROM vendor_catalog_items WHERE id = $1`
+		if err := r.db.Pool.QueryRow(ctx, catQuery, need.CatalogItemID).Scan(&cLat, &cLng, &cAddr); err == nil && cLat != 0 && cLng != 0 {
+			pickupLat = cLat
+			pickupLng = cLng
+			if cAddr != "" {
+				pickupAddr = cAddr
+			}
+		}
+	}
+
+	// Safe coordinate validation
+	if !isValidCoord(pickupLat, pickupLng) || !isValidCoord(deliveryLat, deliveryLng) {
+		return []*domain.CommuteMatchResult{}, nil
+	}
+
+	pickupCoord := spatial.Coordinates{Lat: pickupLat, Lng: pickupLng}
+	deliveryCoord := spatial.Coordinates{Lat: deliveryLat, Lng: deliveryLng}
+
+	// 3. Query active genuine journey OFFER listings
 	query := `
-		SELECT o.id, o.user_id, o.title, COALESCE(o.address_text, ''), o.budget_max, o.metadata, o.created_at,
-		       ST_Y(o.location::geometry) as offer_lat, ST_X(o.location::geometry) as offer_lng,
-		       ST_Distance(o.location, ST_SetSRID(ST_MakePoint($1, $2), 4326)::geography) as dist_pickup,
-		       ST_Distance(o.location, ST_SetSRID(ST_MakePoint($3, $4), 4326)::geography) as dist_delivery,
+		SELECT o.id, o.user_id, o.title, COALESCE(o.description, ''), o.status,
+		       COALESCE(o.address_text, ''), o.budget_max, o.radius_km, COALESCE(o.metadata, '{}'::jsonb), o.created_at,
+		       ST_Y(o.location::geometry) as origin_lat, ST_X(o.location::geometry) as origin_lng,
 		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
 		WHERE o.type = 'OFFER'
-		  AND o.status IN ('OPEN', 'PENDING_MATCHING')
-		  AND o.user_id != $5;
+		  AND (o.order_mode = 'JOURNEY' OR o.metadata->>'is_journey' = 'true')
+		  AND o.status IN ('OPEN', 'PENDING_MATCHING', 'ACTIVE')
+		  AND o.status NOT IN ('PAUSED', 'CANCELLED')
+		  AND COALESCE(o.metadata->>'is_active', 'true') != 'false'
+		  AND o.user_id != $1;
 	`
 
-	rows, err := r.db.Pool.Query(ctx, query, pickupLng, pickupLat, deliveryLng, deliveryLat, need.UserID)
+	rows, err := r.db.Pool.Query(ctx, query, need.UserID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to query commuter offers: %w", err)
 	}
@@ -457,89 +859,52 @@ func (r *OpportunityRepository) FindCommuterRouteMatches(ctx context.Context, ne
 
 	for rows.Next() {
 		var offerID, providerID uuid.UUID
-		var title, addressText, fullName, phone, avatarURL string
+		var title, desc, status, addressText, fullName, phone, avatarURL string
 		var budgetMax *float64
-		var metadata map[string]interface{}
+		var radiusKM, originLat, originLng, trustScore float64
+		var metaRaw []byte
 		var createdAt time.Time
-		var offerLat, offerLng, distPickup, distDelivery, trustScore float64
 
 		err := rows.Scan(
-			&offerID, &providerID, &title, &addressText, &budgetMax, &metadata, &createdAt,
-			&offerLat, &offerLng, &distPickup, &distDelivery,
+			&offerID, &providerID, &title, &desc, &status,
+			&addressText, &budgetMax, &radiusKM, &metaRaw, &createdAt,
+			&originLat, &originLng,
 			&fullName, &phone, &avatarURL, &trustScore,
 		)
 		if err != nil {
 			return nil, err
 		}
 
-		// Extract origin & destination addresses from offer metadata
-		originAddr := addressText
-		destAddr := addressText
-		travelFreq := "DAILY"
-		travelMode := "BIKE"
-
-		if metadata != nil {
-			if oaddr, ok := metadata["origin_address"].(string); ok && oaddr != "" {
-				originAddr = oaddr
-			}
-			if daddr, ok := metadata["destination_address"].(string); ok && daddr != "" {
-				destAddr = daddr
-			}
-			if tf, ok := metadata["travel_frequency"].(string); ok && tf != "" {
-				travelFreq = tf
-			}
-			if tm, ok := metadata["travel_mode"].(string); ok && tm != "" {
-				travelMode = tm
-			}
+		var journeyMeta map[string]interface{}
+		if len(metaRaw) > 0 {
+			_ = json.Unmarshal(metaRaw, &journeyMeta)
 		}
 
-		// Spatial Proximity Matching check:
-		// Check if Commuter Origin is near Pickup AND Commuter Destination is near Delivery
-		// (OR vice-versa for round-trip commuters)
-		// We use originLat/Lng and destLat/Lng calculation or distance threshold
-		isMatched := (distPickup <= radiusMeters && distDelivery <= radiusMeters)
-
-		// Calculate total detour meters & estimated detour time
-		totalDetour := distPickup + distDelivery
-		detourMin := int(totalDetour / 500.0)
-		if detourMin < 1 {
-			detourMin = 1
+		journeyOpp := &domain.Opportunity{
+			ID:          offerID,
+			UserID:      providerID,
+			Title:       title,
+			Description: desc,
+			Status:      domain.OpportunityStatus(status),
+			AddressText: addressText,
+			BudgetMax:   budgetMax,
+			RadiusKM:    radiusKM,
+			Lat:         originLat,
+			Lng:         originLng,
+			OrderMode:   domain.OrderModeJourney,
+			CreatedAt:   createdAt,
+			Metadata:    metaRaw,
 		}
 
-		payoutCents := 4000 // Default ₹40 payout for micro-commute delivery
-		if need.BudgetMax != nil && *need.BudgetMax > 0 {
-			payoutCents = int(*need.BudgetMax * 100)
-		} else if budgetMax != nil && *budgetMax > 0 {
-			payoutCents = int(*budgetMax * 100)
+		candidateUser := &domain.User{
+			ID:         providerID,
+			FullName:   fullName,
+			Phone:      phone,
+			AvatarURL:  avatarURL,
+			TrustScore: trustScore,
 		}
 
-		if isMatched {
-			match := &domain.CommuteMatchResult{
-				OfferID:              offerID,
-				NeedID:               needID,
-				ProviderID:           providerID,
-				Provider: &domain.User{
-					ID:         providerID,
-					FullName:   fullName,
-					Phone:      phone,
-					AvatarURL:  avatarURL,
-					TrustScore: trustScore,
-				},
-				OfferTitle:           title,
-				OriginAddress:        originAddr,
-				DestinationAddress:   destAddr,
-				PickupAddress:        pickupAddr,
-				DeliveryAddress:      deliveryAddr,
-				PickupDetourMeters:   distPickup,
-				DeliveryDetourMeters: distDelivery,
-				TotalDetourMeters:    totalDetour,
-				EstimatedDetourMin:   detourMin,
-				EstimatedPayoutCents: payoutCents,
-				FormattedPayout:      fmt.Sprintf("₹%.0f", float64(payoutCents)/100.0),
-				TravelMode:           travelMode,
-				TravelFrequency:      travelFreq,
-				CreatedAt:            createdAt,
-			}
+		if match, ok := EvaluateCommuteMatch(need, pickupCoord, deliveryCoord, pickupAddr, deliveryAddr, journeyOpp, journeyMeta, candidateUser, radiusMeters); ok {
 			matches = append(matches, match)
 		}
 	}
@@ -586,18 +951,31 @@ func (r *OpportunityRepository) FindEligibleProvidersForCategory(ctx context.Con
 	return providers, nil
 }
 
-// SaveOpportunityMatch inserts or updates an opportunity match record
-func (r *OpportunityRepository) SaveOpportunityMatch(ctx context.Context, oppID, providerID uuid.UUID, status string) error {
+// SaveOpportunityMatchWithDetails inserts or updates an opportunity match record with distance, quote, and notes
+func (r *OpportunityRepository) SaveOpportunityMatchWithDetails(ctx context.Context, oppID, providerID uuid.UUID, status string, distanceMeters, quoteAmount float64, notes string) error {
 	query := `
-		INSERT INTO opportunity_matches (id, opportunity_id, matched_user_id, status)
-		VALUES (gen_random_uuid(), $1, $2, $3)
-		ON CONFLICT (opportunity_id, matched_user_id) DO UPDATE SET status = EXCLUDED.status, updated_at = NOW();
+		INSERT INTO opportunity_matches (id, opportunity_id, matched_user_id, status, distance_meters, quote_amount, notes, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, $4, $5, $6, NOW())
+		ON CONFLICT (opportunity_id, matched_user_id) DO UPDATE
+		SET status = CASE 
+				WHEN opportunity_matches.status IN ('ACCEPTED', 'DECLINED', 'EXPIRED') THEN opportunity_matches.status 
+				ELSE EXCLUDED.status 
+		    END,
+		    distance_meters = EXCLUDED.distance_meters,
+		    quote_amount = EXCLUDED.quote_amount,
+		    notes = EXCLUDED.notes,
+		    updated_at = NOW();
 	`
-	_, err := r.db.Pool.Exec(ctx, query, oppID, providerID, status)
+	_, err := r.db.Pool.Exec(ctx, query, oppID, providerID, status, distanceMeters, quoteAmount, notes)
 	return err
 }
 
-// GetMatchingRequestsForProvider gets unaccepted matching requests for a provider's approved services
+// SaveOpportunityMatch inserts or updates an opportunity match record
+func (r *OpportunityRepository) SaveOpportunityMatch(ctx context.Context, oppID, providerID uuid.UUID, status string) error {
+	return r.SaveOpportunityMatchWithDetails(ctx, oppID, providerID, status, 0, 0, "")
+}
+
+// GetMatchingRequestsForProvider gets unaccepted matching requests for a provider's approved services or matched journeys
 func (r *OpportunityRepository) GetMatchingRequestsForProvider(ctx context.Context, providerID uuid.UUID) ([]*domain.Opportunity, error) {
 	query := `
 		SELECT DISTINCT o.id, o.user_id, o.assigned_user_id, o.category_id, o.type, COALESCE(o.order_mode, 'GENERAL_BROADCAST'), o.title, o.description, o.workflow_model, o.status,
@@ -609,25 +987,35 @@ func (r *OpportunityRepository) GetMatchingRequestsForProvider(ctx context.Conte
 		FROM opportunities o
 		JOIN users u ON o.user_id = u.id
 		LEFT JOIN categories c ON o.category_id = c.id
-		JOIN user_skills_assets usa ON (
-			(o.category_id IS NOT NULL AND usa.category_id = o.category_id)
-			OR (c.slug IS NOT NULL AND (
-				LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_')
-				OR LOWER(usa.asset_type) LIKE REPLACE(LOWER(c.slug), '-', '_') || '%'
-				OR REPLACE(LOWER(c.slug), '-', '_') LIKE LOWER(usa.asset_type) || '%'
-				OR LOWER(usa.title) ILIKE '%' || LOWER(c.name) || '%'
-			))
-			OR EXISTS (SELECT 1 FROM opportunity_matches om WHERE om.opportunity_id = o.id AND om.matched_user_id = $1)
+		LEFT JOIN user_skills_assets usa ON (
+			usa.user_id = $1
+			AND usa.status IN ('APPROVED', 'ACTIVE')
+			AND usa.is_available = TRUE
+			AND (
+				(o.category_id IS NOT NULL AND usa.category_id = o.category_id)
+				OR (c.slug IS NOT NULL AND (
+					LOWER(usa.asset_type) = REPLACE(LOWER(c.slug), '-', '_')
+					OR LOWER(usa.asset_type) LIKE REPLACE(LOWER(c.slug), '-', '_') || '%'
+					OR REPLACE(LOWER(c.slug), '-', '_') LIKE LOWER(usa.asset_type) || '%'
+					OR LOWER(usa.title) ILIKE '%' || LOWER(c.name) || '%'
+				))
+			)
 		)
-		WHERE usa.user_id = $1
-		  AND usa.status IN ('APPROVED', 'ACTIVE')
-		  AND usa.is_available = TRUE
-		  AND o.type = 'NEED'
+		WHERE o.type = 'NEED'
 		  AND o.user_id != $1
 		  AND o.assigned_user_id IS NULL
 		  AND (o.target_vendor_id IS NULL OR o.target_vendor_id = $1)
 		  AND o.status IN ('OPEN', 'OPEN_NEED', 'PENDING_MATCHING', 'ORDER_PLACED')
 		  AND (o.parent_opportunity_id IS NOT NULL OR NOT EXISTS (SELECT 1 FROM opportunities child WHERE child.parent_opportunity_id = o.id))
+		  AND (
+		      usa.id IS NOT NULL
+		      OR EXISTS (
+		          SELECT 1 FROM opportunity_matches om
+		          WHERE om.opportunity_id = o.id
+		            AND om.matched_user_id = $1
+		            AND om.status IN ('PROPOSED', 'NOTIFIED')
+		      )
+		  )
 		ORDER BY o.created_at DESC;
 	`
 	rows, err := r.db.Pool.Query(ctx, query, providerID)
@@ -854,6 +1242,238 @@ func (r *OpportunityRepository) CreateChainLink(ctx context.Context, parentID, c
 	`
 	_, err := r.db.Pool.Exec(ctx, query, parentID, childID, relType)
 	return err
+}
+
+// -----------------------------------------------------------------------------
+// JOURNEY REPOSITORY METHODS (Phase A)
+// -----------------------------------------------------------------------------
+
+// mapOppToUserJourney parses an opportunity row into a clean domain.UserJourney
+func mapOppToUserJourney(id, userID uuid.UUID, title, desc, status, originAddr string, lat, lng, radiusKM float64, metaRaw []byte, createdAt, updatedAt time.Time, user *domain.User) *domain.UserJourney {
+	j := &domain.UserJourney{
+		ID:                 id,
+		UserID:             userID,
+		User:               user,
+		Title:              title,
+		Description:        desc,
+		Status:             status,
+		OriginAddress:      originAddr,
+		OriginLat:          lat,
+		OriginLng:          lng,
+		MaxDetourKM:        radiusKM,
+		MaxDetourMinutes:   15,
+		TravelMode:         "BIKE",
+		JourneyType:        "ONE_TIME",
+		TravelFrequency:    "ONE_TIME",
+		IsActive:           (status == string(domain.StatusOpen) || status == "ACTIVE"),
+		CreatedAt:          createdAt,
+		UpdatedAt:          updatedAt,
+	}
+
+	if len(metaRaw) > 0 {
+		var meta map[string]interface{}
+		if err := json.Unmarshal(metaRaw, &meta); err == nil {
+			if dest, ok := meta["destination_address"].(string); ok && dest != "" {
+				j.DestinationAddress = dest
+			} else if dest, ok := meta["destination"].(string); ok && dest != "" {
+				j.DestinationAddress = dest
+			}
+			if dlat, ok := meta["destination_lat"].(float64); ok {
+				j.DestinationLat = dlat
+			}
+			if dlng, ok := meta["destination_lng"].(float64); ok {
+				j.DestinationLng = dlng
+			}
+			if tm, ok := meta["travel_mode"].(string); ok && tm != "" {
+				j.TravelMode = tm
+			}
+			if jt, ok := meta["journey_type"].(string); ok && jt != "" {
+				j.JourneyType = jt
+			}
+			if tf, ok := meta["travel_frequency"].(string); ok && tf != "" {
+				j.TravelFrequency = tf
+			}
+			if dws, ok := meta["departure_window_start"].(string); ok {
+				j.DepartureWindowStart = dws
+			}
+			if dwe, ok := meta["departure_window_end"].(string); ok {
+				j.DepartureWindowEnd = dwe
+			}
+			if aws, ok := meta["arrival_window_start"].(string); ok {
+				j.ArrivalWindowStart = aws
+			}
+			if awe, ok := meta["arrival_window_end"].(string); ok {
+				j.ArrivalWindowEnd = awe
+			}
+			if mdm, ok := meta["max_detour_minutes"].(float64); ok && mdm > 0 {
+				j.MaxDetourMinutes = int(mdm)
+			}
+			if mdkm, ok := meta["max_detour_km"].(float64); ok && mdkm > 0 {
+				j.MaxDetourKM = mdkm
+			}
+			if daysRaw, ok := meta["available_days"].([]interface{}); ok {
+				var days []string
+				for _, d := range daysRaw {
+					if dStr, ok := d.(string); ok {
+						days = append(days, dStr)
+					}
+				}
+				j.AvailableDays = days
+			}
+			if act, ok := meta["is_active"].(bool); ok {
+				j.IsActive = act && (status == string(domain.StatusOpen) || status == "ACTIVE")
+			}
+		}
+	}
+
+	return j
+}
+
+// GetUserJourneys returns all journey offers created by the specified user
+func (r *OpportunityRepository) GetUserJourneys(ctx context.Context, userID uuid.UUID) ([]*domain.UserJourney, error) {
+	query := `
+		SELECT o.id, o.user_id, o.title, COALESCE(o.description, ''), o.status,
+		       ST_Y(o.location::geometry) as lat, ST_X(o.location::geometry) as lng,
+		       COALESCE(o.address_text, ''), o.radius_km, COALESCE(o.metadata, '{}'::jsonb),
+		       o.created_at, o.updated_at,
+		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score
+		FROM opportunities o
+		JOIN users u ON o.user_id = u.id
+		WHERE o.user_id = $1
+		  AND o.type = 'OFFER'
+		  AND (o.order_mode = 'JOURNEY' OR (o.metadata->>'is_journey')::boolean = true OR o.metadata ? 'destination_address' OR o.metadata ? 'destination')
+		ORDER BY o.created_at DESC;
+	`
+	rows, err := r.db.Pool.Query(ctx, query, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query user journeys: %w", err)
+	}
+	defer rows.Close()
+
+	var journeys []*domain.UserJourney
+	for rows.Next() {
+		var id, uid uuid.UUID
+		var title, desc, status, originAddr, fullName, phone, avatarURL string
+		var lat, lng, radiusKM, trustScore float64
+		var metaRaw []byte
+		var createdAt, updatedAt time.Time
+
+		err := rows.Scan(
+			&id, &uid, &title, &desc, &status,
+			&lat, &lng, &originAddr, &radiusKM, &metaRaw,
+			&createdAt, &updatedAt,
+			&fullName, &phone, &avatarURL, &trustScore,
+		)
+		if err != nil {
+			return nil, err
+		}
+
+		u := &domain.User{
+			ID:         uid,
+			FullName:   fullName,
+			Phone:      phone,
+			AvatarURL:  avatarURL,
+			TrustScore: trustScore,
+		}
+
+		j := mapOppToUserJourney(id, uid, title, desc, status, originAddr, lat, lng, radiusKM, metaRaw, createdAt, updatedAt, u)
+		journeys = append(journeys, j)
+	}
+	return journeys, nil
+}
+
+// GetJourneyByID retrieves a single journey with ownership check
+func (r *OpportunityRepository) GetJourneyByID(ctx context.Context, id, userID uuid.UUID) (*domain.UserJourney, error) {
+	query := `
+		SELECT o.id, o.user_id, o.title, COALESCE(o.description, ''), o.status,
+		       ST_Y(o.location::geometry) as lat, ST_X(o.location::geometry) as lng,
+		       COALESCE(o.address_text, ''), o.radius_km, COALESCE(o.metadata, '{}'::jsonb),
+		       o.created_at, o.updated_at,
+		       u.full_name, COALESCE(u.phone, ''), COALESCE(u.avatar_url, ''), u.trust_score
+		FROM opportunities o
+		JOIN users u ON o.user_id = u.id
+		WHERE o.id = $1 AND o.user_id = $2;
+	`
+	var uid uuid.UUID
+	var title, desc, status, originAddr, fullName, phone, avatarURL string
+	var lat, lng, radiusKM, trustScore float64
+	var metaRaw []byte
+	var createdAt, updatedAt time.Time
+
+	err := r.db.Pool.QueryRow(ctx, query, id, userID).Scan(
+		&id, &uid, &title, &desc, &status,
+		&lat, &lng, &originAddr, &radiusKM, &metaRaw,
+		&createdAt, &updatedAt,
+		&fullName, &phone, &avatarURL, &trustScore,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("journey not found or unauthorized: %w", err)
+	}
+
+	u := &domain.User{
+		ID:         uid,
+		FullName:   fullName,
+		Phone:      phone,
+		AvatarURL:  avatarURL,
+		TrustScore: trustScore,
+	}
+
+	return mapOppToUserJourney(id, uid, title, desc, status, originAddr, lat, lng, radiusKM, metaRaw, createdAt, updatedAt, u), nil
+}
+
+// UpdateJourney updates journey fields with strict ownership check
+func (r *OpportunityRepository) UpdateJourney(ctx context.Context, id, userID uuid.UUID, title, desc, originAddr string, originLat, originLng, maxDetourKM float64, metadata json.RawMessage) (*domain.UserJourney, error) {
+	query := `
+		UPDATE opportunities
+		SET title = $3,
+		    description = $4,
+		    address_text = $5,
+		    location = ST_SetSRID(ST_MakePoint($6, $7), 4326)::geography,
+		    radius_km = $8,
+		    metadata = $9,
+		    updated_at = NOW()
+		WHERE id = $1 AND user_id = $2
+		RETURNING id, user_id, title, COALESCE(description, ''), status,
+		          ST_Y(location::geometry) as lat, ST_X(location::geometry) as lng,
+		          COALESCE(address_text, ''), radius_km, COALESCE(metadata, '{}'::jsonb),
+		          created_at, updated_at;
+	`
+	var uid uuid.UUID
+	var status string
+	var lat, lng, radius float64
+	var metaRaw []byte
+	var createdAt, updatedAt time.Time
+
+	err := r.db.Pool.QueryRow(ctx, query, id, userID, title, desc, originAddr, originLng, originLat, maxDetourKM, metadata).Scan(
+		&id, &uid, &title, &desc, &status,
+		&lat, &lng, &originAddr, &radius, &metaRaw,
+		&createdAt, &updatedAt,
+	)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update journey: %w", err)
+	}
+
+	return mapOppToUserJourney(id, uid, title, desc, status, originAddr, lat, lng, radius, metaRaw, createdAt, updatedAt, nil), nil
+}
+
+// UpdateJourneyStatus updates status (OPEN, PAUSED, CANCELLED) and is_active flag with ownership check
+func (r *OpportunityRepository) UpdateJourneyStatus(ctx context.Context, id, userID uuid.UUID, status domain.OpportunityStatus, isActive bool) error {
+	isActiveJSON, _ := json.Marshal(isActive)
+	query := `
+		UPDATE opportunities
+		SET status = $3,
+		    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{is_active}', $4::jsonb),
+		    updated_at = NOW()
+		WHERE id = $1 AND user_id = $2;
+	`
+	cmdTag, err := r.db.Pool.Exec(ctx, query, id, userID, status, isActiveJSON)
+	if err != nil {
+		return fmt.Errorf("failed to update journey status: %w", err)
+	}
+	if cmdTag.RowsAffected() == 0 {
+		return fmt.Errorf("journey not found or unauthorized")
+	}
+	return nil
 }
 
 

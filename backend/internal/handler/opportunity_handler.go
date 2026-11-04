@@ -2,7 +2,9 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -85,9 +87,13 @@ func (h *OpportunityHandler) Create(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if user == nil {
-		users, err := h.userRepo.ListUsers(r.Context())
-		if err == nil && len(users) > 0 {
-			user = users[0]
+		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+		appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+		if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
+			users, err := h.userRepo.ListUsers(r.Context())
+			if err == nil && len(users) > 0 {
+				user = users[0]
+			}
 		}
 	}
 	if user == nil {
@@ -224,7 +230,74 @@ func (h *OpportunityHandler) GetByID(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Privacy and IDOR protection: Sanitize sensitive personal data and restrict confirmed order access
+	caller := h.getUserFromRequest(r)
+	isOwner := caller != nil && caller.ID == opp.UserID
+	isAssigned := caller != nil && opp.AssignedUserID != nil && caller.ID == *opp.AssignedUserID
+	isTargetVendor := caller != nil && opp.TargetVendorID != nil && caller.ID == *opp.TargetVendorID
+	isAdmin := caller != nil && caller.Role == domain.RoleAdmin
+
+	// IDOR Protection: Private confirmed/in-progress orders are restricted to parties involved
+	isPublicDiscoveryStage := opp.Status == domain.StatusOpen || opp.Status == domain.StatusOpenNeed || opp.Status == domain.StatusMatched || opp.Status == domain.StatusPendingMatching
+	if !isPublicDiscoveryStage && !isOwner && !isAssigned && !isTargetVendor && !isAdmin {
+		response.Error(w, http.StatusForbidden, "Access denied: you do not have permission to view this order", nil)
+		return
+	}
+
+	// Secret Protection: Delivery OTP is strictly confidential to the customer owner.
+	// Even assigned drivers, transport providers, and vendors must never see delivery OTP.
+	if !isOwner && !isAdmin {
+		if len(opp.Metadata) > 0 {
+			var meta map[string]interface{}
+			if err := json.Unmarshal(opp.Metadata, &meta); err == nil {
+				delete(meta, "delivery_otp")
+				delete(meta, "delivery_otp_hash")
+				delete(meta, "delivery_otp_attempts")
+				delete(meta, "delivery_otp_expires_at")
+				cleanedBytes, _ := json.Marshal(meta)
+				opp.Metadata = cleanedBytes
+			}
+		}
+	}
+
+	if !isOwner && !isAssigned && !isTargetVendor && !isAdmin {
+		// Mask customer phone number
+		if opp.User != nil && opp.User.Phone != "" {
+			opp.User.Phone = postgres.MaskPhone(opp.User.Phone)
+		}
+		// Redact confidential prescription images and exact apartment door numbers before acceptance
+		if len(opp.Metadata) > 0 {
+			var meta map[string]interface{}
+			if err := json.Unmarshal(opp.Metadata, &meta); err == nil {
+				delete(meta, "prescription_url")
+				delete(meta, "prescription_photo")
+				delete(meta, "medical_notes")
+				delete(meta, "door_number")
+				delete(meta, "flat_number")
+				cleanedBytes, _ := json.Marshal(meta)
+				opp.Metadata = cleanedBytes
+			}
+		}
+	}
+
 	response.JSON(w, http.StatusOK, "Opportunity retrieved successfully", opp)
+}
+
+func (h *OpportunityHandler) DispatchCommuterMatches(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid opportunity ID format", nil)
+		return
+	}
+
+	matches, err := h.oppService.ProcessCommuterDeliveryMatches(r.Context(), id)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to dispatch commuter matches", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Commuter route matches evaluated and notified", matches)
 }
 
 func (h *OpportunityHandler) FindMatches(w http.ResponseWriter, r *http.Request) {
@@ -641,4 +714,180 @@ func (h *OpportunityHandler) ConfirmResources(w http.ResponseWriter, r *http.Req
 	}
 
 	response.JSON(w, http.StatusOK, "Resource details confirmed and customer notified successfully", updated)
+}
+
+// -----------------------------------------------------------------------------
+// JOURNEY HANDLER METHODS (Phase A)
+// -----------------------------------------------------------------------------
+
+func (h *OpportunityHandler) resolveRequestUser(r *http.Request, explicitID string) (*domain.User, error) {
+	claims, ok := middleware.GetUserClaims(r.Context())
+	if ok && claims.SupabaseUID != "" {
+		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+		if err == nil && u != nil {
+			return u, nil
+		}
+		if parsedUID, err := uuid.Parse(claims.SupabaseUID); err == nil {
+			u, err := h.userRepo.GetByID(r.Context(), parsedUID)
+			if err == nil && u != nil {
+				return u, nil
+			}
+		}
+	}
+
+	if explicitID != "" {
+		if parsedUID, err := uuid.Parse(explicitID); err == nil {
+			u, err := h.userRepo.GetByID(r.Context(), parsedUID)
+			if err == nil && u != nil {
+				return u, nil
+			}
+		}
+		// Try resolving by phone number
+		u, err := h.userRepo.GetByPhone(r.Context(), explicitID)
+		if err == nil && u != nil {
+			return u, nil
+		}
+	}
+
+	// Local development fallback only when NOT running in production
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
+	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
+		users, err := h.userRepo.ListUsers(r.Context())
+		if err == nil && len(users) > 0 {
+			return users[0], nil
+		}
+	}
+
+	return nil, fmt.Errorf("user not found or unauthenticated")
+}
+
+// RegisterJourney handles POST /api/v1/journeys
+func (h *OpportunityHandler) RegisterJourney(w http.ResponseWriter, r *http.Request) {
+	var req domain.RegisterJourneyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	user, err := h.resolveRequestUser(r, req.UserID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "User authentication required to register a journey", err.Error())
+		return
+	}
+
+	journey, err := h.oppService.RegisterJourney(r.Context(), user.ID, &req)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusCreated, "Journey registered successfully", journey)
+}
+
+// ListUserJourneys handles GET /api/v1/journeys
+func (h *OpportunityHandler) ListUserJourneys(w http.ResponseWriter, r *http.Request) {
+	explicitID := r.URL.Query().Get("user_id")
+	user, err := h.resolveRequestUser(r, explicitID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "User authentication required to view journeys", err.Error())
+		return
+	}
+
+	journeys, err := h.oppService.ListUserJourneys(r.Context(), user.ID)
+	if err != nil {
+		response.Error(w, http.StatusInternalServerError, "Failed to retrieve journeys", err.Error())
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "User journeys retrieved successfully", journeys)
+}
+
+// GetJourney handles GET /api/v1/journeys/{id}
+func (h *OpportunityHandler) GetJourney(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	journeyID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid journey ID format", nil)
+		return
+	}
+
+	explicitID := r.URL.Query().Get("user_id")
+	user, err := h.resolveRequestUser(r, explicitID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "User authentication required", err.Error())
+		return
+	}
+
+	journey, err := h.oppService.GetJourney(r.Context(), journeyID, user.ID)
+	if err != nil {
+		response.Error(w, http.StatusNotFound, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Journey retrieved successfully", journey)
+}
+
+// UpdateJourney handles PUT /api/v1/journeys/{id}
+func (h *OpportunityHandler) UpdateJourney(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	journeyID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid journey ID format", nil)
+		return
+	}
+
+	var req domain.UpdateJourneyRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	explicitID := r.URL.Query().Get("user_id")
+	user, err := h.resolveRequestUser(r, explicitID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "User authentication required", err.Error())
+		return
+	}
+
+	updated, err := h.oppService.UpdateJourney(r.Context(), journeyID, user.ID, &req)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, "Journey updated successfully", updated)
+}
+
+// SetJourneyStatus handles POST /api/v1/journeys/{id}/status
+func (h *OpportunityHandler) SetJourneyStatus(w http.ResponseWriter, r *http.Request) {
+	idStr := chi.URLParam(r, "id")
+	journeyID, err := uuid.Parse(idStr)
+	if err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid journey ID format", nil)
+		return
+	}
+
+	var req domain.UpdateJourneyStatusRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	explicitID := r.URL.Query().Get("user_id")
+	user, err := h.resolveRequestUser(r, explicitID)
+	if err != nil {
+		response.Error(w, http.StatusUnauthorized, "User authentication required", err.Error())
+		return
+	}
+
+	if err := h.oppService.SetJourneyStatus(r.Context(), journeyID, user.ID, req.Action); err != nil {
+		response.Error(w, http.StatusBadRequest, err.Error(), nil)
+		return
+	}
+
+	response.JSON(w, http.StatusOK, fmt.Sprintf("Journey status updated to %s", strings.ToUpper(req.Action)), map[string]interface{}{
+		"id":     journeyID,
+		"action": strings.ToUpper(req.Action),
+	})
 }

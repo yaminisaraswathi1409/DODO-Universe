@@ -1,0 +1,13 @@
+[1mdiff --git a/backend/.env.example b/backend/.env.example[m
+[1mindex 022bb66..2e804ac 100644[m
+[1m--- a/backend/.env.example[m
+[1m+++ b/backend/.env.example[m
+[36m@@ -7,7 +7,7 @@[m [mENV=development[m
+ DATABASE_URL=postgres://postgres.your-tenant:your-password@aws-0-ap-south-1.pooler.supabase.com:6543/postgres?sslmode=require[m
+ [m
+ # Supabase Auth Configuration[m
+[31m-# Used by Go backend middleware to validate Supabase-issued RS256 / HS256 JWT tokens[m
+[32m+[m[32m# Used by Go backend middleware to validate Supabase-issued RS256 / HS256 JWT tokens[m[41m [m
+ SUPABASE_JWT_SECRET=your-supabase-jwt-secret-here[m
+ [m
+ # Optional Cors Allowed Origins (comma separated)[m

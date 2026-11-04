@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"log"
@@ -41,6 +42,9 @@ func (r *UserRepository) scanUserRow(row pgx.Row) (*domain.User, error) {
 
 	res.Status = domain.UserStatus(statusStr)
 	res.Role = domain.UserRole(roleStr)
+	if res.Status == domain.StatusSuspended {
+		res.IsSuspended = true
+	}
 
 	return &res, nil
 }
@@ -990,6 +994,54 @@ func (r *UserRepository) CreateNotification(ctx context.Context, notif *domain.N
 	return &res, nil
 }
 
+// CreateNotificationIdempotent inserts a notification only if one with the same dedupeKey does not exist for this user.
+// Returns (notification, wasCreated, error).
+func (r *UserRepository) CreateNotificationIdempotent(ctx context.Context, notif *domain.Notification, dedupeKey string) (*domain.Notification, bool, error) {
+	if dedupeKey == "" {
+		res, err := r.CreateNotification(ctx, notif)
+		return res, err == nil, err
+	}
+
+	// First check if a notification with this dedupeKey already exists for this user
+	checkQuery := `
+		SELECT id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at
+		FROM notifications
+		WHERE user_id = $1 AND metadata->>'dedupe_key' = $2
+		LIMIT 1;
+	`
+	var existing domain.Notification
+	err := r.db.Pool.QueryRow(ctx, checkQuery, notif.UserID, dedupeKey).Scan(
+		&existing.ID, &existing.UserID, &existing.Title, &existing.Message, &existing.Type, &existing.Metadata, &existing.IsRead, &existing.CreatedAt,
+	)
+	if err == nil {
+		// Already exists -> idempotent no-op
+		return &existing, false, nil
+	}
+
+	// Inject dedupeKey into metadata
+	var meta map[string]interface{}
+	if len(notif.Metadata) > 0 {
+		_ = json.Unmarshal(notif.Metadata, &meta)
+	}
+	if meta == nil {
+		meta = make(map[string]interface{})
+	}
+	meta["dedupe_key"] = dedupeKey
+	notif.Metadata, _ = json.Marshal(meta)
+
+	query := `
+		INSERT INTO notifications (user_id, title, message, type, metadata)
+		VALUES ($1, $2, $3, COALESCE(NULLIF($4, ''), 'INFO'), COALESCE($5, '{}'::jsonb))
+		RETURNING id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at;
+	`
+	row := r.db.Pool.QueryRow(ctx, query, notif.UserID, notif.Title, notif.Message, notif.Type, notif.Metadata)
+	var res domain.Notification
+	if err := row.Scan(&res.ID, &res.UserID, &res.Title, &res.Message, &res.Type, &res.Metadata, &res.IsRead, &res.CreatedAt); err != nil {
+		return nil, false, fmt.Errorf("failed to create notification: %w", err)
+	}
+	return &res, true, nil
+}
+
 func (r *UserRepository) GetUserNotifications(ctx context.Context, userID uuid.UUID) ([]*domain.Notification, error) {
 	query := `
 		SELECT id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at
@@ -1034,12 +1086,432 @@ func (r *UserRepository) GetUnreadNotificationCount(ctx context.Context, userID 
 	return count, err
 }
 
+// FetchQueuedNotifications retrieves pending or queued notifications from the persistent queue
+func (r *UserRepository) FetchQueuedNotifications(ctx context.Context, limit int) ([]*domain.Notification, error) {
+	if r.db == nil || r.db.Pool == nil {
+		return nil, nil
+	}
+	query := `
+		SELECT id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at
+		FROM notifications
+		WHERE (metadata->>'status' = 'QUEUED' OR metadata->>'status' = 'PENDING')
+		  AND (metadata->>'next_retry_at' IS NULL OR (metadata->>'next_retry_at')::timestamptz <= NOW())
+		ORDER BY created_at ASC
+		LIMIT $1;
+	`
+	rows, err := r.db.Pool.Query(ctx, query, limit)
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching queued notifications: %w", err)
+	}
+	defer rows.Close()
 
+	var list []*domain.Notification
+	for rows.Next() {
+		var n domain.Notification
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Title, &n.Message, &n.Type, &n.Metadata, &n.IsRead, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &n)
+	}
+	return list, nil
+}
 
+// UpdateNotificationDispatchStatus persists the final delivery status and gateway telemetry to the notification row
+func (r *UserRepository) UpdateNotificationDispatchStatus(ctx context.Context, notifID uuid.UUID, status string, gateway string, attempts int, errorMsg string) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	query := `
+		UPDATE notifications
+		SET locked_by = NULL,
+		    locked_at = NULL,
+		    metadata = jsonb_set(
+			jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						COALESCE(metadata, '{}'::jsonb),
+						'{status}', to_jsonb($2::text)
+					),
+					'{gateway}', to_jsonb($3::text)
+				),
+				'{attempts}', to_jsonb($4::int)
+			),
+			'{error}', to_jsonb($5::text)
+		) || jsonb_build_object('dispatched_at', NOW()::text)
+		WHERE id = $1;
+	`
+	_, err := r.db.Pool.Exec(ctx, query, notifID, status, gateway, attempts, errorMsg)
+	return err
+}
 
+// ScheduleNotificationRetry updates notification back to QUEUED with next_retry_at, unlocking the record for future worker claims
+func (r *UserRepository) ScheduleNotificationRetry(ctx context.Context, notifID uuid.UUID, attempts int, nextRetryAt time.Time, errorMsg string) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	query := `
+		UPDATE notifications
+		SET locked_by = NULL,
+		    locked_at = NULL,
+		    metadata = jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						jsonb_set(
+							COALESCE(metadata, '{}'::jsonb),
+							'{status}', '"QUEUED"'::jsonb
+						),
+						'{attempts}', to_jsonb($2::int)
+					),
+					'{next_retry_at}', to_jsonb($3::text)
+				),
+				'{error}', to_jsonb($4::text)
+			) || jsonb_build_object('retry_scheduled_at', NOW()::text)
+		WHERE id = $1;
+	`
+	_, err := r.db.Pool.Exec(ctx, query, notifID, attempts, nextRetryAt.Format(time.RFC3339), errorMsg)
+	return err
+}
 
+// FailNotification marks a notification permanently FAILED, releasing locks and preserving attempt counts
+func (r *UserRepository) FailNotification(ctx context.Context, notifID uuid.UUID, attempts int, errorMsg string) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	query := `
+		UPDATE notifications
+		SET locked_by = NULL,
+		    locked_at = NULL,
+		    metadata = jsonb_set(
+				jsonb_set(
+					jsonb_set(
+						COALESCE(metadata, '{}'::jsonb),
+						'{status}', '"FAILED"'::jsonb
+					),
+					'{attempts}', to_jsonb($2::int)
+				),
+				'{error}', to_jsonb($3::text)
+			) || jsonb_build_object('failed_at', NOW()::text)
+		WHERE id = $1;
+	`
+	_, err := r.db.Pool.Exec(ctx, query, notifID, attempts, errorMsg)
+	return err
+}
 
+// RecoverStaleLocks finds notifications left in PROCESSING by dead workers and unlocks them back to QUEUED
+func (r *UserRepository) RecoverStaleLocks(ctx context.Context, staleThreshold time.Duration) (int64, error) {
+	if r.db == nil || r.db.Pool == nil {
+		return 0, nil
+	}
+	intervalSec := int(staleThreshold.Seconds())
+	if intervalSec <= 0 {
+		intervalSec = 300
+	}
 
+	query := fmt.Sprintf(`
+		UPDATE notifications
+		SET locked_by = NULL,
+		    locked_at = NULL,
+		    metadata = jsonb_set(COALESCE(metadata, '{}'::jsonb), '{status}', '"QUEUED"')
+		WHERE (metadata->>'status' = 'PROCESSING')
+		  AND (locked_at IS NULL OR locked_at < NOW() - INTERVAL '%d seconds');
+	`, intervalSec)
 
+	res, err := r.db.Pool.Exec(ctx, query)
+	if err != nil {
+		if strings.Contains(err.Error(), "locked_by") || strings.Contains(err.Error(), "locked_at") {
+			return 0, nil
+		}
+		return 0, err
+	}
+	return res.RowsAffected(), nil
+}
 
+// ============================================================================
+// PHASE 7: NOTIFICATION PREFERENCES, FILTERING & GOVERNANCE METHODS
+// ============================================================================
+
+// GetNotificationPreferences retrieves channel and category preferences for a user
+func (r *UserRepository) GetNotificationPreferences(ctx context.Context, userID uuid.UUID) (*domain.NotificationPreference, error) {
+	defaultPref := &domain.NotificationPreference{
+		UserID:             userID,
+		InAppEnabled:       true,
+		SMSEnabled:         true,
+		PushEnabled:        true,
+		DisabledCategories: []string{},
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+	}
+
+	if r.db == nil || r.db.Pool == nil {
+		return defaultPref, nil
+	}
+
+	query := `
+		SELECT user_id, in_app_enabled, sms_enabled, push_enabled, disabled_categories, created_at, updated_at
+		FROM user_notification_preferences
+		WHERE user_id = $1;
+	`
+	var pref domain.NotificationPreference
+	err := r.db.Pool.QueryRow(ctx, query, userID).Scan(
+		&pref.UserID,
+		&pref.InAppEnabled,
+		&pref.SMSEnabled,
+		&pref.PushEnabled,
+		&pref.DisabledCategories,
+		&pref.CreatedAt,
+		&pref.UpdatedAt,
+	)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) || strings.Contains(err.Error(), "does not exist") {
+			return defaultPref, nil
+		}
+		return nil, fmt.Errorf("failed to get notification preferences: %w", err)
+	}
+
+	if pref.DisabledCategories == nil {
+		pref.DisabledCategories = []string{}
+	}
+	return &pref, nil
+}
+
+// UpsertNotificationPreferences updates or creates user notification preferences
+func (r *UserRepository) UpsertNotificationPreferences(ctx context.Context, pref *domain.NotificationPreference) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	if pref == nil {
+		return fmt.Errorf("preferences cannot be nil")
+	}
+
+	if pref.DisabledCategories == nil {
+		pref.DisabledCategories = []string{}
+	}
+
+	query := `
+		INSERT INTO user_notification_preferences (user_id, in_app_enabled, sms_enabled, push_enabled, disabled_categories, updated_at)
+		VALUES ($1, $2, $3, $4, $5, NOW())
+		ON CONFLICT (user_id) DO UPDATE
+		SET in_app_enabled = EXCLUDED.in_app_enabled,
+		    sms_enabled = EXCLUDED.sms_enabled,
+		    push_enabled = EXCLUDED.push_enabled,
+		    disabled_categories = EXCLUDED.disabled_categories,
+		    updated_at = NOW();
+	`
+	_, err := r.db.Pool.Exec(ctx, query, pref.UserID, pref.InAppEnabled, pref.SMSEnabled, pref.PushEnabled, pref.DisabledCategories)
+	if err != nil {
+		return fmt.Errorf("failed to upsert notification preferences: %w", err)
+	}
+	return nil
+}
+
+// GetFilteredNotifications retrieves paginated notifications with optional type and read filtering
+func (r *UserRepository) GetFilteredNotifications(ctx context.Context, filter *domain.NotificationFilter) (*domain.NotificationPage, error) {
+	page := filter.Page
+	if page <= 0 {
+		page = 1
+	}
+	pageSize := filter.PageSize
+	if pageSize <= 0 || pageSize > 100 {
+		pageSize = 20
+	}
+	offset := (page - 1) * pageSize
+
+	res := &domain.NotificationPage{
+		Notifications: []*domain.Notification{},
+		TotalCount:    0,
+		Page:          page,
+		PageSize:      pageSize,
+		UnreadCount:   0,
+	}
+
+	if r.db == nil || r.db.Pool == nil {
+		return res, nil
+	}
+
+	// 1. Fetch unread count for user
+	unreadCount, _ := r.GetUnreadNotificationCount(ctx, filter.UserID)
+	res.UnreadCount = unreadCount
+
+	// 2. Build dynamic where clause
+	whereClauses := []string{"user_id = $1"}
+	args := []interface{}{filter.UserID}
+	argIdx := 2
+
+	if filter.Type != "" {
+		whereClauses = append(whereClauses, fmt.Sprintf("type = $%d", argIdx))
+		args = append(args, filter.Type)
+		argIdx++
+	}
+
+	if filter.UnreadOnly != nil && *filter.UnreadOnly {
+		whereClauses = append(whereClauses, "is_read = FALSE")
+	}
+
+	whereSQL := strings.Join(whereClauses, " AND ")
+
+	// 3. Count total matching
+	countQuery := fmt.Sprintf("SELECT COUNT(*) FROM notifications WHERE %s;", whereSQL)
+	var total int
+	err := r.db.Pool.QueryRow(ctx, countQuery, args...).Scan(&total)
+	if err != nil {
+		if strings.Contains(err.Error(), "does not exist") {
+			return res, nil
+		}
+		return nil, fmt.Errorf("failed counting notifications: %w", err)
+	}
+	res.TotalCount = total
+
+	if total == 0 {
+		return res, nil
+	}
+
+	// 4. Fetch page items
+	itemsQuery := fmt.Sprintf(`
+		SELECT id, user_id, title, message, type, COALESCE(metadata, '{}'::jsonb), is_read, created_at
+		FROM notifications
+		WHERE %s
+		ORDER BY created_at DESC
+		LIMIT $%d OFFSET $%d;
+	`, whereSQL, argIdx, argIdx+1)
+
+	args = append(args, pageSize, offset)
+
+	rows, err := r.db.Pool.Query(ctx, itemsQuery, args...)
+	if err != nil {
+		return nil, fmt.Errorf("failed fetching notifications: %w", err)
+	}
+	defer rows.Close()
+
+	for rows.Next() {
+		var n domain.Notification
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Title, &n.Message, &n.Type, &n.Metadata, &n.IsRead, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+
+		// Privacy Protection: sanitize metadata to ensure no raw OTP or secret token is exposed
+		if len(n.Metadata) > 0 {
+			var rawMap map[string]interface{}
+			if err := json.Unmarshal(n.Metadata, &rawMap); err == nil {
+				sanitized := domain.SanitizeSensitiveData(rawMap)
+				sanitizedBytes, _ := json.Marshal(sanitized)
+				n.Metadata = sanitizedBytes
+			}
+		}
+
+		res.Notifications = append(res.Notifications, &n)
+	}
+
+	return res, nil
+}
+
+// ClaimQueuedNotifications atomically claims queued notification jobs using FOR UPDATE SKIP LOCKED
+func (r *UserRepository) ClaimQueuedNotifications(ctx context.Context, workerID string, limit int) ([]*domain.Notification, error) {
+	if r.db == nil || r.db.Pool == nil {
+		return nil, nil
+	}
+	if limit <= 0 {
+		limit = 50
+	}
+
+	query := `
+		WITH claimed AS (
+			SELECT id
+			FROM notifications
+			WHERE (
+				(metadata->>'status' = 'QUEUED' OR metadata->>'status' = 'PENDING' OR metadata->>'status' IS NULL)
+				OR (metadata->>'status' = 'PROCESSING' AND locked_at < NOW() - INTERVAL '5 minutes')
+			)
+			AND (metadata->>'next_retry_at' IS NULL OR (metadata->>'next_retry_at')::timestamptz <= NOW())
+			ORDER BY created_at ASC
+			LIMIT $1
+			FOR UPDATE SKIP LOCKED
+		)
+		UPDATE notifications n
+		SET locked_by = $2,
+		    locked_at = NOW(),
+		    metadata = jsonb_set(COALESCE(n.metadata, '{}'::jsonb), '{status}', '"PROCESSING"')
+		FROM claimed c
+		WHERE n.id = c.id
+		RETURNING n.id, n.user_id, n.title, n.message, n.type, COALESCE(n.metadata, '{}'::jsonb), n.is_read, n.created_at;
+	`
+
+	rows, err := r.db.Pool.Query(ctx, query, limit, workerID)
+	if err != nil {
+		// Fallback for schema variants without locking columns
+		if strings.Contains(err.Error(), "locked_by") || strings.Contains(err.Error(), "locked_at") {
+			return r.FetchQueuedNotifications(ctx, limit)
+		}
+		return nil, fmt.Errorf("failed claiming queued notifications: %w", err)
+	}
+	defer rows.Close()
+
+	var list []*domain.Notification
+	for rows.Next() {
+		var n domain.Notification
+		if err := rows.Scan(&n.ID, &n.UserID, &n.Title, &n.Message, &n.Type, &n.Metadata, &n.IsRead, &n.CreatedAt); err != nil {
+			return nil, err
+		}
+		list = append(list, &n)
+	}
+	return list, nil
+}
+
+// SuspendVendor marks a vendor account suspended with mandatory reason and governance audit
+func (r *UserRepository) SuspendVendor(ctx context.Context, vendorID, adminID uuid.UUID, reason string) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	query := `
+		UPDATE users
+		SET status = 'SUSPENDED',
+		    is_suspended = TRUE,
+		    suspension_reason = $2,
+		    suspended_at = NOW(),
+		    suspended_by = $3,
+		    updated_at = NOW()
+		WHERE id = $1;
+	`
+	res, err := r.db.Pool.Exec(ctx, query, vendorID, reason, adminID)
+	if err != nil {
+		// If is_suspended column doesn't exist yet, fallback to status
+		if strings.Contains(err.Error(), "is_suspended") {
+			_, err = r.db.Pool.Exec(ctx, "UPDATE users SET status = 'SUSPENDED', updated_at = NOW() WHERE id = $1;", vendorID)
+			return err
+		}
+		return fmt.Errorf("failed to suspend vendor: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("vendor with ID %s not found", vendorID.String())
+	}
+	return nil
+}
+
+// ReactivateVendor restores a suspended vendor account to active status
+func (r *UserRepository) ReactivateVendor(ctx context.Context, vendorID, adminID uuid.UUID) error {
+	if r.db == nil || r.db.Pool == nil {
+		return nil
+	}
+	query := `
+		UPDATE users
+		SET status = 'ACTIVE',
+		    is_suspended = FALSE,
+		    suspension_reason = NULL,
+		    suspended_at = NULL,
+		    suspended_by = NULL,
+		    updated_at = NOW()
+		WHERE id = $1;
+	`
+	res, err := r.db.Pool.Exec(ctx, query, vendorID)
+	if err != nil {
+		if strings.Contains(err.Error(), "is_suspended") {
+			_, err = r.db.Pool.Exec(ctx, "UPDATE users SET status = 'ACTIVE', updated_at = NOW() WHERE id = $1;", vendorID)
+			return err
+		}
+		return fmt.Errorf("failed to reactivate vendor: %w", err)
+	}
+	if res.RowsAffected() == 0 {
+		return fmt.Errorf("vendor with ID %s not found", vendorID.String())
+	}
+	return nil
+}
 

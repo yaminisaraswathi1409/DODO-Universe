@@ -85,7 +85,7 @@ export default async function CategoriesPage() {
                 {children.map((cat) => {
                   const actionLabel = getServiceActionLabel(cat);
                   return (
-                    <Link key={cat.id} href={`/opportunities?category=${cat.slug}`}>
+                    <Link key={cat.id} href={`/marketplace?category=${cat.slug}`}>
                       <div className="bg-white hover:bg-slate-50 p-6 rounded-2xl border border-slate-200 flex flex-col justify-between h-full group shadow-sm hover:shadow-md transition-all">
                         <div className="space-y-3">
                           <div className="p-3 rounded-xl bg-slate-100 border border-slate-200 w-fit text-black group-hover:scale-105 transition-transform">

@@ -6,11 +6,13 @@ import { usePathname, useRouter, useSearchParams } from 'next/navigation';
 import { UserProfile, getStoredUser, clearUserSession } from '@/lib/api';
 import {
   LayoutDashboard,
+  Activity,
   Users,
   UserCheck,
   Package,
   Layers,
   FileCheck,
+  FileText,
   GitMerge,
   CreditCard,
   BarChart3,
@@ -50,6 +52,18 @@ export default function AdminSidebar({ children }: AdminSidebarProps) {
   };
 
   const navItems = [
+    {
+      label: 'Operations & SOS',
+      href: '/admin/users?tab=operations',
+      icon: Activity,
+      isActive: currentTab === 'operations',
+    },
+    {
+      label: 'Audit Logs',
+      href: '/admin/users?tab=audit_logs',
+      icon: FileText,
+      isActive: currentTab === 'audit_logs',
+    },
     {
       label: 'Dashboard',
       href: '/admin/users?tab=dashboard',

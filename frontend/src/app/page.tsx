@@ -37,8 +37,9 @@ export default function HomePage() {
             </div>
           </Link>
 
-          <nav className="hidden md:flex items-center gap-8 text-sm font-semibold text-slate-600">
+          <nav className="hidden md:flex items-center gap-8 text-sm font-semibold text-slate-600">
             <Link href="/categories" className="hover:text-black transition-colors">Categories</Link>
+            <Link href="/marketplace" className="hover:text-black transition-colors font-bold text-slate-900">Marketplace</Link>
             <Link href="/opportunities" className="hover:text-black transition-colors">Opportunities</Link>
             <Link href="/categories" className="hover:text-black transition-colors">Services</Link>
             {currentUser ? (

@@ -2,8 +2,8 @@
 
 import React, { useState, useEffect } from 'react';
 import { useParams, useRouter } from 'next/navigation';
-import { getOpportunityByID, getOpportunityTree, Opportunity, OpportunityTreeNode } from '@/lib/api';
-import { CheckCircle2, Clock, MapPin, Phone, MessageSquare, Truck, ShieldCheck, Wrench, AlertTriangle, ArrowLeft, RefreshCw, User, Package, Calendar } from 'lucide-react';
+import { getOpportunityByID, getOpportunityTree, generateDeliveryOTP, Opportunity, OpportunityTreeNode } from '@/lib/api';
+import { CheckCircle2, Clock, MapPin, Phone, MessageSquare, Truck, ShieldCheck, Wrench, AlertTriangle, ArrowLeft, RefreshCw, User, Package, Calendar, QrCode, FileText, Camera, Check, Shield } from 'lucide-react';
 import Link from 'next/link';
 import OrderResourceArrangements from '@/components/OrderResourceArrangements';
 
@@ -23,6 +23,23 @@ export default function CustomerOrderTrackingPage() {
   const [tree, setTree] = useState<OpportunityTreeNode | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState('');
+  const [customerDeliveryOtp, setCustomerDeliveryOtp] = useState<string | null>(null);
+  const [otpLoading, setOtpLoading] = useState(false);
+
+  const fetchCustomerOTP = async () => {
+    if (!orderId) return;
+    setOtpLoading(true);
+    try {
+      const code = await generateDeliveryOTP(orderId);
+      if (code) {
+        setCustomerDeliveryOtp(code);
+      }
+    } catch (err: any) {
+      console.warn('Customer delivery OTP fetch error:', err.message);
+    } finally {
+      setOtpLoading(false);
+    }
+  };
 
   const loadData = async () => {
     if (!orderId) return;
@@ -43,7 +60,20 @@ export default function CustomerOrderTrackingPage() {
     loadData();
     const interval = setInterval(loadData, 10000);
     return () => clearInterval(interval);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [orderId]);
+
+  useEffect(() => {
+    if (opp) {
+      const st = opp.status;
+      if (st === 'IN_TRANSIT' || st === 'IN_TRANSIT_AGAIN' || st === 'OUT_FOR_DELIVERY' || st === 'DELIVERED') {
+        if (!customerDeliveryOtp && !otpLoading) {
+          fetchCustomerOTP();
+        }
+      }
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [opp?.status]);
 
   if (loading) {
     return (
@@ -73,16 +103,19 @@ export default function CustomerOrderTrackingPage() {
   const isSomeoneElse = meta.for_someone_else;
   const recipient = meta.recipient_details;
   const quantity = opp.quantity ?? meta.quantity ?? meta.quantity_bags ?? meta.cargo_weight_tons ?? meta.farm_area_acres;
-  const isTransportOrRepair = opp.category?.slug === 'logistics-transport' || opp.category?.slug === 'flatbed-transport' || opp.category?.slug === 'vehicle-repair' || opp.category?.slug === 'roadside-repair';
+  const status = opp.status;
 
-  // Check for Incident / Repair sub-tasks in tree internally without technical jargon
+  // Check for Incident / Repair sub-tasks in tree internally
   let hasIncident = false;
   let isRepairCompleted = false;
+  let manifest = tree?.manifest || null;
+
   if (tree) {
     if (tree.incident) hasIncident = true;
     if (tree.children && tree.children.length > 0) {
       for (const childNode of tree.children) {
         if (childNode.incident) hasIncident = true;
+        if (childNode.manifest && !manifest) manifest = childNode.manifest;
         if (childNode.opportunity?.status === 'REPAIR_COMPLETED' || childNode.opportunity?.status === 'COMPLETED') {
           isRepairCompleted = true;
         }
@@ -90,35 +123,64 @@ export default function CustomerOrderTrackingPage() {
     }
   }
 
-  // Construct Visual E-Commerce Progress Timeline
+  // Delivery OTP (Generated securely on server, viewable by recipient customer)
+  const deliveryOtp = customerDeliveryOtp || meta.delivery_otp || null;
+
+  // Construct Visual E-Commerce Progress Timeline for Phase 6
   const getTimelineSteps = (): TimelineStep[] => {
-    const status = opp.status;
+    const isCompleted = status === 'COMPLETED';
+    const isDelivered = status === 'DELIVERED' || isCompleted;
+    const isOutForDelivery = status === 'OUT_FOR_DELIVERY' || isDelivered;
+    const isInTransit = status === 'IN_TRANSIT' || status === 'IN_TRANSIT_AGAIN' || isOutForDelivery;
+    const isPickupVerified = status === 'PICKUP_VERIFIED' || isInTransit;
+    const isReadyPickup = status === 'READY_FOR_PICKUP' || isPickupVerified;
+    const isPreparing = status === 'FULFILMENT_PREPARATION' || status === 'PREPARING' || status === 'RESOURCE_ARRANGEMENT' || status === 'LOGISTICS_CONFIRMED' || isReadyPickup;
+    const isVendorAccepted = status === 'VENDOR_ACCEPTED' || status === 'ACCEPTED' || isPreparing;
 
-    if (isTransportOrRepair) {
-      // Transport & Roadside Emergency Cascade Stages
-      return [
-        { id: '1', label: 'Request Placed', status: 'completed' },
-        { id: '2', label: 'Provider / Driver Accepted', status: status !== 'OPEN' ? 'completed' : 'current' },
-        { id: '3', label: 'Dispatched & On The Way', status: status === 'IN_PROGRESS' || status === 'COMPLETED' ? 'completed' : status === 'ACCEPTED' ? 'current' : 'pending' },
-        { id: '4', label: 'In Transit', status: status === 'IN_PROGRESS' || status === 'COMPLETED' ? 'completed' : 'pending' },
-        ...(hasIncident
-          ? [
-              { id: '5a', label: 'Vehicle Problem Detected', status: ('warning' as const) },
-              { id: '5b', label: 'Emergency Mechanic Repair', status: isRepairCompleted ? ('completed' as const) : ('current' as const) },
-              { id: '5c', label: 'Journey Resumed', status: isRepairCompleted ? ('completed' as const) : ('pending' as const) },
-            ]
-          : []),
-        { id: '6', label: 'Delivered / Completed', status: status === 'COMPLETED' ? 'completed' : 'pending' },
-      ];
-    }
-
-    // Standard Service / Delivery Timeline
     return [
-      { id: '1', label: 'Request Placed', status: 'completed' },
-      { id: '2', label: 'Provider Accepted', status: status !== 'OPEN' ? 'completed' : 'current' },
-      { id: '3', label: 'Preparing Service', status: status === 'IN_PROGRESS' || status === 'COMPLETED' ? 'completed' : status === 'ACCEPTED' ? 'current' : 'pending' },
-      { id: '4', label: 'Dispatched / In Progress', status: status === 'IN_PROGRESS' || status === 'COMPLETED' ? 'completed' : 'pending' },
-      { id: '5', label: 'Service Delivered & Completed', status: status === 'COMPLETED' ? 'completed' : 'pending' },
+      { id: '1', label: 'Order Confirmed & Escrow Held', status: 'completed' },
+      {
+        id: '2',
+        label: 'Vendor Accepted & Allocation',
+        status: isVendorAccepted ? 'completed' : status === 'ORDER_CONFIRMED' || status === 'VENDOR_REVIEW' ? 'current' : 'pending',
+      },
+      {
+        id: '3',
+        label: 'Fulfilment Preparation & Packaging',
+        status: isPreparing ? 'completed' : isVendorAccepted ? 'current' : 'pending',
+      },
+      {
+        id: '4',
+        label: 'Logistics Ready & Manifest Issued',
+        status: isReadyPickup ? 'completed' : isPreparing ? 'current' : 'pending',
+      },
+      {
+        id: '5',
+        label: 'Loaded & In Transit',
+        status: isInTransit ? 'completed' : isReadyPickup ? 'current' : 'pending',
+      },
+      ...(hasIncident
+        ? [
+            { id: 'sos-1', label: 'Vehicle Telemetry Alert / SOS Triggered', status: ('warning' as const) },
+            { id: 'sos-2', label: 'Emergency Roadside Assistance Dispatched', status: isRepairCompleted ? ('completed' as const) : ('current' as const) },
+            { id: 'sos-3', label: 'Highway Repair Verified & Transit Resumed', status: isRepairCompleted ? ('completed' as const) : ('pending' as const) },
+          ]
+        : []),
+      {
+        id: '6',
+        label: 'Out for Final Delivery',
+        status: isOutForDelivery ? (isDelivered ? 'completed' : 'current') : 'pending',
+      },
+      {
+        id: '7',
+        label: 'Delivered (PoD Captured)',
+        status: isDelivered ? (isCompleted ? 'completed' : 'current') : 'pending',
+      },
+      {
+        id: '8',
+        label: 'OTP Verified & Escrow Settled',
+        status: isCompleted ? 'completed' : 'pending',
+      },
     ];
   };
 
@@ -146,12 +208,59 @@ export default function CustomerOrderTrackingPage() {
           <span className="text-xs font-mono text-slate-500">Order ID: #{opp.id.slice(0, 8)}</span>
         </div>
 
+        {/* SOS Breakdown Alert Banner if active incident */}
+        {hasIncident && !isRepairCompleted && (
+          <div className="p-4 rounded-2xl bg-amber-50 border border-amber-300 text-amber-900 flex items-start gap-3 shadow-sm animate-pulse">
+            <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
+            <div className="text-xs space-y-1">
+              <span className="font-bold text-amber-900 block text-sm">Vehicle Breakdown Detected on Transit Route</span>
+              <p className="text-amber-800">
+                Automated roadside diagnostics telemetry was received. Mobile mechanic assistance and replacement auto parts have been dispatched. Your shipment is safely paused on the highway shoulder.
+              </p>
+            </div>
+          </div>
+        )}
+
+        {/* Customer Secure Delivery OTP Banner (Visible when shipment is approaching or delivered) */}
+        {deliveryOtp && status !== 'COMPLETED' && (
+          <div className="bg-gradient-to-r from-emerald-600 to-teal-700 text-white rounded-3xl p-6 shadow-lg space-y-3 relative overflow-hidden">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Shield className="w-5 h-5 text-emerald-200" />
+                <span className="text-xs font-bold uppercase tracking-wider text-emerald-100">Digital Handshake Delivery Verification</span>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-emerald-500/30 text-emerald-100 text-[10px] font-bold">Single-Use Code</span>
+            </div>
+            <div>
+              <span className="text-xs text-emerald-100 block">Your Secret 6-Digit Delivery OTP:</span>
+              <div className="flex items-center justify-between mt-2">
+                <div className="text-3xl font-black font-mono tracking-widest text-white">
+                  {customerDeliveryOtp || deliveryOtp}
+                </div>
+                <button
+                  type="button"
+                  onClick={fetchCustomerOTP}
+                  disabled={otpLoading}
+                  className="px-3.5 py-1.5 rounded-xl bg-white/20 hover:bg-white/30 text-white text-xs font-bold flex items-center gap-1.5 transition-all shadow-sm"
+                  title="If delivery attempts failed or were locked out, click to generate a fresh secure OTP"
+                >
+                  <RefreshCw className={`w-3.5 h-3.5 ${otpLoading ? 'animate-spin' : ''}`} />
+                  <span>Regenerate OTP</span>
+                </button>
+              </div>
+            </div>
+            <p className="text-xs text-emerald-100/90 leading-relaxed">
+              Share this OTP with the delivery driver <strong>only after inspecting your received cargo</strong> at your delivery address. Driver verification of this code securely completes your order and settles funds from escrow.
+            </p>
+          </div>
+        )}
+
         {/* Order Summary Hero Card */}
         <div className="bg-white border border-slate-200 rounded-3xl p-6 shadow-md space-y-4 relative overflow-hidden">
           <div className="flex items-start justify-between">
             <div>
               <span className="px-3 py-1 rounded-full bg-slate-100 text-slate-900 border border-slate-300 text-xs font-bold uppercase tracking-wider">
-                {opp.category?.name || meta.category_name || 'Service Order'}
+                {opp.category?.name || meta.category_name || 'Catalog Fulfilment'}
               </span>
               <h1 className="text-2xl font-black text-slate-900 mt-2">{opp.title}</h1>
               <p className="text-slate-600 text-xs mt-1">{opp.description}</p>
@@ -180,24 +289,77 @@ export default function CustomerOrderTrackingPage() {
               <span className="text-black font-bold uppercase">{opp.status}</span>
             </div>
             <div>
-              <span className="text-slate-500 text-[11px] block">Estimated Delivery</span>
-              <span className="text-slate-900 font-semibold">{opp.scheduled_start ? new Date(opp.scheduled_start).toLocaleDateString() : 'Within 2 Hours'}</span>
+              <span className="text-slate-500 text-[11px] block">Scheduled Delivery</span>
+              <span className="text-slate-900 font-semibold">{opp.scheduled_start ? new Date(opp.scheduled_start).toLocaleDateString() : 'Priority Fulfilment'}</span>
             </div>
           </div>
         </div>
 
+        {/* Digital Way Manifest Card (If generated) */}
+        {manifest && (
+          <div className="bg-white border border-slate-200 rounded-2xl p-5 shadow-sm space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+              <div className="flex items-center gap-2">
+                <FileText className="w-5 h-5 text-black" />
+                <div>
+                  <span className="text-[10px] font-bold uppercase text-slate-500 tracking-wider block">Official Digital Way Manifest</span>
+                  <span className="text-sm font-mono font-bold text-slate-900">{manifest.manifest_number}</span>
+                </div>
+              </div>
+              <span className="px-2.5 py-1 rounded-full bg-slate-100 text-slate-800 text-[11px] font-bold uppercase border border-slate-200">
+                {manifest.status}
+              </span>
+            </div>
+
+            <div className="grid grid-cols-2 sm:grid-cols-3 gap-3 text-xs">
+              <div>
+                <span className="text-slate-500 text-[11px] block">Routing Barcode</span>
+                <span className="font-mono text-slate-900 font-semibold">{manifest.routing_barcode}</span>
+              </div>
+              {manifest.pol_captured_at && (
+                <div>
+                  <span className="text-slate-500 text-[11px] block">Proof of Loading (PoL)</span>
+                  <span className="text-emerald-700 font-bold flex items-center gap-1">
+                    <Check className="w-3.5 h-3.5" /> Verified
+                  </span>
+                </div>
+              )}
+              {manifest.pod_captured_at && (
+                <div>
+                  <span className="text-slate-500 text-[11px] block">Proof of Delivery (PoD)</span>
+                  <span className="text-emerald-700 font-bold flex items-center gap-1">
+                    <Check className="w-3.5 h-3.5" /> Captured
+                  </span>
+                </div>
+              )}
+            </div>
+
+            {/* Proof of Loading Photo Preview if available */}
+            {manifest.pol_photo_url && (
+              <div className="pt-2 border-t border-slate-100">
+                <span className="text-[11px] text-slate-500 block mb-1 font-semibold flex items-center gap-1">
+                  <Camera className="w-3.5 h-3.5" /> Verified Cargo Loading Photo
+                </span>
+                <img
+                  src={manifest.pol_photo_url}
+                  alt="Proof of Loading"
+                  className="w-full max-h-48 object-cover rounded-xl border border-slate-200"
+                />
+              </div>
+            )}
+          </div>
+        )}
+
         {/* Delivery Address & Recipient Card */}
         <div className="grid sm:grid-cols-2 gap-4">
-          {/* Delivery Location */}
           <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-2 shadow-sm">
             <span className="text-xs font-bold uppercase text-slate-500 tracking-wider flex items-center gap-1.5">
               <MapPin className="w-4 h-4 text-black" />
-              <span>Delivery / Service Address</span>
+              <span>Destination Delivery Location</span>
             </span>
-            <p className="text-slate-900 text-sm font-medium">{opp.address_text || 'Choutuppal, Telangana'}</p>
+            <p className="text-slate-900 text-sm font-medium">{opp.address_text || meta.delivery_address || 'Customer Delivery Site'}</p>
           </div>
 
-          {/* Recipient Details */}
           <div className="bg-white border border-slate-200 rounded-2xl p-5 space-y-2 shadow-sm">
             <span className="text-xs font-bold uppercase text-slate-500 tracking-wider flex items-center gap-1.5">
               <User className="w-4 h-4 text-black" />
@@ -211,17 +373,17 @@ export default function CustomerOrderTrackingPage() {
               </div>
             ) : (
               <div>
-                <div className="text-slate-900 text-sm font-bold">Ordered For Myself</div>
-                <div className="text-slate-500 text-xs">Logged-in Customer Account</div>
+                <div className="text-slate-900 text-sm font-bold">{opp.user?.full_name || 'Customer Account'}</div>
+                <div className="text-slate-500 text-xs">{opp.user?.phone || 'Verified Customer'}</div>
               </div>
             )}
           </div>
         </div>
 
-        {/* Accepted Provider Profile & Direct Contact Buttons */}
+        {/* Accepted Vendor / Provider Profile */}
         {opp.status !== 'OPEN' && (() => {
           const assignedProvider = opp.assigned_user || opp.target_vendor;
-          const providerName = assignedProvider?.full_name || 'Verified Service Provider';
+          const providerName = assignedProvider?.full_name || 'Verified Vendor Partner';
           const providerPhone = assignedProvider?.phone || '';
 
           return (
@@ -231,11 +393,11 @@ export default function CustomerOrderTrackingPage() {
                   <ShieldCheck className="w-6 h-6 text-black" />
                 </div>
                 <div>
-                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-900">Assigned Provider</span>
+                  <span className="text-[10px] font-black uppercase tracking-wider text-slate-900">Fulfilment Partner</span>
                   <h3 className="text-base font-black text-slate-900">{providerName}</h3>
                   <div className="text-xs text-slate-600 flex items-center gap-2 justify-center sm:justify-start mt-0.5">
                     <span className="text-slate-900 font-bold">★ 4.9 Rating</span>
-                    <span>• Verified Partner</span>
+                    <span>• Verified Vendor</span>
                   </div>
                 </div>
               </div>
@@ -248,7 +410,7 @@ export default function CustomerOrderTrackingPage() {
                       className="flex-1 sm:flex-none px-4 py-2.5 rounded-xl bg-black hover:bg-slate-800 text-white text-xs font-bold flex items-center justify-center gap-1.5 shadow-sm transition-all"
                     >
                       <Phone className="w-4 h-4" />
-                      <span>Call Provider</span>
+                      <span>Call Vendor</span>
                     </a>
                     <a
                       href={`sms:${providerPhone}`}
@@ -259,7 +421,7 @@ export default function CustomerOrderTrackingPage() {
                     </a>
                   </>
                 ) : (
-                  <span className="text-xs text-slate-500 font-medium">Provider Contact Connected</span>
+                  <span className="text-xs text-slate-500 font-medium">Vendor Connected</span>
                 )}
               </div>
             </div>
@@ -274,9 +436,9 @@ export default function CustomerOrderTrackingPage() {
           <div>
             <h3 className="text-lg font-bold text-slate-900 flex items-center gap-2">
               <Clock className="w-5 h-5 text-black" />
-              <span>Live Order Progress Timeline</span>
+              <span>Fulfilment & Logistics Progress</span>
             </h3>
-            <p className="text-slate-600 text-xs">Real-time status updates powered by PostGIS matching engine.</p>
+            <p className="text-slate-600 text-xs">Real-time status tracking across vendor preparation, transit, and delivery handshake.</p>
           </div>
 
           <div className="relative pl-6 border-l-2 border-slate-200 space-y-6">
@@ -327,9 +489,9 @@ export default function CustomerOrderTrackingPage() {
                       {isCompleted
                         ? 'Completed'
                         : isCurrent
-                        ? 'Active stage in progress...'
+                        ? 'Stage in progress...'
                         : isWarning
-                        ? 'Telemetry breakdown alert -- mobile mechanic dispatched'
+                        ? 'Telemetry breakdown alert on route'
                         : 'Pending next stage'}
                     </p>
                   </div>

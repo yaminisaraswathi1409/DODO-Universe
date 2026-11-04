@@ -1,7 +1,7 @@
 'use client';
 
 import React, { useState, useEffect } from 'react';
-import { Category, createOpportunity, getCategories, Opportunity, OpportunityFieldSpec, uploadFile, UserProfile, listUsers, getUserAddresses, UserAddress, VendorCatalogItem, UserServiceAsset, calculateDeliveryFee, DeliveryCalculationResult } from '@/lib/api';
+import { Category, createOpportunity, getCategories, Opportunity, OpportunityFieldSpec, uploadFile, UserProfile, listUsers, getUserAddresses, UserAddress, VendorCatalogItem, UserServiceAsset, calculateDeliveryFee, DeliveryCalculationResult, validateCart, initiateCheckout, processPaymentCallback } from '@/lib/api';
 import LocationSelectorModal, { LocationData } from './LocationSelectorModal';
 import SavedAddressesModal from './SavedAddressesModal';
 import { useCart } from '@/context/CartContext';
@@ -460,20 +460,21 @@ export default function CreateOrderWizardModal({
           else if (targetSlug) {
             const slugMatch = cats.find((c) => c.slug === targetSlug);
             if (slugMatch) setSelectedCategoryId(slugMatch.id);
-            else if (!selectedCategoryId) setSelectedCategoryId(cats[0].id);
-          } else if (!selectedCategoryId) setSelectedCategoryId(cats[0].id);
+            else if (!selectedCategoryId) setSelectedCategoryId((cats.find((c) => c.is_selectable !== false) || cats[0]).id);
+          } else if (!selectedCategoryId) setSelectedCategoryId((cats.find((c) => c.is_selectable !== false) || cats[0]).id);
         } else if (targetSlug) {
           const match = cats.find((c) => c.slug === targetSlug);
           if (match) setSelectedCategoryId(match.id);
-          else if (!selectedCategoryId) setSelectedCategoryId(cats[0].id);
+          else if (!selectedCategoryId) setSelectedCategoryId((cats.find((c) => c.is_selectable !== false) || cats[0]).id);
         } else if (!selectedCategoryId) {
-          setSelectedCategoryId(cats[0].id);
+          setSelectedCategoryId((cats.find((c) => c.is_selectable !== false) || cats[0]).id);
         }
       }
     }
     if (isOpen) {
       loadCats();
     }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen, initialCategorySlug, initialCategoryId, directOrderParams, cartItems]);
 
   const selectedCategory = categories.find((c) => c.id === selectedCategoryId || c.slug === selectedCategoryId);
@@ -818,7 +819,67 @@ export default function CreateOrderWizardModal({
         },
       };
 
-      const created = await createOpportunity(payload);
+      let created: Opportunity | null = null;
+
+      // Phase 5: If ordering catalog items, invoke server-authoritative validation & checkout lifecycle
+      const catalogValidationItems = cartItems.length > 0
+        ? cartItems.filter(it => it.catalogItemId).map(it => ({
+            catalog_item_id: it.catalogItemId!,
+            quantity: it.quantity,
+            selected_optional_services: (it.selectedAddons || []).map(a => a.id || a.title),
+          }))
+        : (directOrderParams?.catalogItem ? [{
+            catalog_item_id: directOrderParams.catalogItem.id,
+            quantity: directOrderParams.quantity || 1,
+            selected_optional_services: [],
+          }] : []);
+
+      if (catalogValidationItems.length > 0) {
+        // 1. Authoritative Cart Validation
+        const valRes = await validateCart({
+          items: catalogValidationItems,
+          delivery_lat: deliveryLat,
+          delivery_lng: deliveryLng,
+          address_text: deliveryAddr,
+        });
+
+        if (!valRes.is_valid) {
+          throw new Error(valRes.rejection_reason || 'Cart validation failed on server');
+        }
+
+        // 2. Initiate Reservation & Order
+        const checkoutRes = await initiateCheckout({
+          items: catalogValidationItems,
+          delivery_lat: deliveryLat,
+          delivery_lng: deliveryLng,
+          address_text: deliveryAddr,
+          user_id: currentUser?.id,
+          payment_method: paymentMethod === 'COD' ? 'CASH_ON_DELIVERY' : 'SIMULATED_GATEWAY',
+        });
+
+        // 3. Confirm Simulated Gateway Payment (commits reservation, deducts stock, holds escrow)
+        await processPaymentCallback({
+          payment_reference: checkoutRes.payment_reference,
+          signature: checkoutRes.payment_signature,
+          status: 'SUCCESS',
+          gateway_txn_id: `GW_${Date.now()}`,
+        });
+
+        created = {
+          id: checkoutRes.opportunity_id,
+          title: valRes.items?.[0]?.title ? `Catalog Order: ${valRes.items[0].title}` : 'Catalog Order',
+          description: `Direct catalog order from ${valRes.vendor_name}`,
+          type: 'NEED',
+          status: 'ORDER_CONFIRMED',
+          lat: deliveryLat,
+          lng: deliveryLng,
+          address_text: deliveryAddr,
+          created_at: new Date().toISOString(),
+        } as Opportunity;
+      } else {
+        // Fallback for general broadcast / non-catalog requests (Scenario 1 preserved)
+        created = await createOpportunity(payload);
+      }
       if (created) {
         if (cartItems.length > 0) {
           clearCart();

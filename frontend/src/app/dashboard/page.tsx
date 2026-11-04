@@ -45,8 +45,13 @@ import LocationSelectorModal, { LocationData } from '@/components/LocationSelect
 import SavedAddressesModal from '@/components/SavedAddressesModal';
 import ProviderOrderFeed from '@/components/ProviderOrderFeed';
 import VendorCatalogManager from '@/components/VendorCatalogManager';
+import NotificationPreferencesModal from '@/components/NotificationPreferencesModal';
+import { getFilteredNotifications } from '@/lib/api';
+import { SlidersHorizontal, ChevronLeft as ChevronLeftIcon, ChevronRight as ChevronRightIcon } from 'lucide-react';
+import MyJourneysView from '@/components/MyJourneysView';
 
 import {
+  Compass,
   User,
   Smartphone,
   Mail,
@@ -125,18 +130,34 @@ function UserDashboardContent() {
     lng: 78.95,
   });
 
-  // Notifications State & Fetching
+  // Notifications State & Fetching (Phase 7)
   const [notificationsList, setNotificationsList] = useState<UserNotification[]>([]);
   const [loadingNotifications, setLoadingNotifications] = useState(false);
+  const [isPreferencesOpen, setIsPreferencesOpen] = useState(false);
+  const [notifTypeFilter, setNotifTypeFilter] = useState<string>('ALL');
+  const [notifUnreadOnly, setNotifUnreadOnly] = useState(false);
+  const [notifPage, setNotifPage] = useState(1);
+  const [notifTotalCount, setNotifTotalCount] = useState(0);
+  const notifPageSize = 10;
 
   const fetchUserNotificationsData = async (userIdent: string) => {
     if (!userIdent) return;
     setLoadingNotifications(true);
     try {
-      const res = await getUserNotifications(userIdent);
+      const typeParam = notifTypeFilter === 'ALL' ? undefined : notifTypeFilter;
+      const res = await getFilteredNotifications({
+        page: notifPage,
+        pageSize: notifPageSize,
+        type: typeParam,
+        unreadOnly: notifUnreadOnly ? true : undefined,
+      });
       setNotificationsList(res.notifications || []);
+      setNotifTotalCount(res.total_count || 0);
     } catch {
-      // keep state
+      // fallback
+      const fallback = await getUserNotifications(userIdent);
+      setNotificationsList(fallback.notifications || []);
+      setNotifTotalCount(fallback.notifications?.length || 0);
     } finally {
       setLoadingNotifications(false);
     }
@@ -146,7 +167,7 @@ function UserDashboardContent() {
     if (user && (user.phone || user.id)) {
       fetchUserNotificationsData(user.phone || user.id);
     }
-  }, [user, currentTab]);
+  }, [user, currentTab, notifTypeFilter, notifUnreadOnly, notifPage]);
 
   const handleMarkAllRead = async () => {
     if (!user) return;
@@ -169,6 +190,10 @@ function UserDashboardContent() {
       handleMarkSingleRead(notif.id);
     }
     const meta = notif.metadata || {};
+    if (meta.action_url) {
+      router.push(meta.action_url);
+      return;
+    }
     const targetOppId = meta.opportunity_id || meta.parent_id || meta.order_id;
     if (targetOppId) {
       router.push(`/opportunities/${targetOppId}`);
@@ -211,6 +236,7 @@ function UserDashboardContent() {
 
   useEffect(() => {
     loadDbOpps();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [user]);
 
   const fetchUserData = async (phone: string, userId: string) => {
@@ -413,6 +439,27 @@ function UserDashboardContent() {
   return (
     <UserSidebar>
       <div className="max-w-7xl mx-auto w-full px-4 sm:px-6 py-6 space-y-6">
+        
+        {/* Phase 7: Vendor Suspension Alert Banner */}
+        {(user?.is_suspended || user?.status === 'SUSPENDED') && (
+          <div className="p-4 sm:p-5 rounded-2xl bg-red-50 border-2 border-red-300 flex items-start gap-3.5 shadow-sm text-red-900 animate-in fade-in">
+            <AlertTriangle className="w-6 h-6 text-red-600 shrink-0 mt-0.5" />
+            <div className="space-y-1">
+              <div className="flex items-center gap-2">
+                <span className="px-2.5 py-0.5 rounded-full bg-red-600 text-white font-extrabold text-[10px] uppercase tracking-wider">
+                  ACCOUNT SUSPENDED
+                </span>
+                <span className="text-xs font-bold text-red-800">Operational Notice</span>
+              </div>
+              <p className="text-xs font-medium text-red-800 leading-relaxed">
+                {user.suspension_reason || 'Your account is currently suspended by platform operations governance.'}
+              </p>
+              <p className="text-[11px] text-red-700">
+                You cannot receive new order opportunities or create catalog offerings while suspended. Pre-existing confirmed orders will continue to be fulfilled.
+              </p>
+            </div>
+          </div>
+        )}
         
         {/* ========================================================================= */}
         {/* 1. ACCEPTED ORDERS TAB VIEW (currentTab === 'accepted' || currentTab === 'requests') */}
@@ -676,6 +723,13 @@ function UserDashboardContent() {
           </div>
         )}
 
+        {/* ========================================================================= */}
+        {/* MY JOURNEYS TAB VIEW (currentTab === 'journeys')                          */}
+        {/* ========================================================================= */}
+        {currentTab === 'journeys' && (
+          <MyJourneysView currentUser={user} />
+        )}
+
 
         {/* ========================================================================= */}
         {/* SAVED ADDRESSES TAB VIEW (currentTab === 'addresses')                    */}
@@ -737,14 +791,65 @@ function UserDashboardContent() {
                 <p className="text-xs text-slate-500">Instant status updates, order acceptances, document approvals, and alerts.</p>
               </div>
 
-              <button
-                type="button"
-                onClick={handleMarkAllRead}
-                className="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-800 hover:bg-slate-200 font-bold text-xs border border-slate-200 flex items-center gap-2 transition-all active:scale-95"
-              >
-                <CheckCircle2 className="w-4 h-4 text-slate-900" />
-                <span>Mark All as Read</span>
-              </button>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsPreferencesOpen(true)}
+                  className="px-4 py-2.5 rounded-xl bg-white text-slate-700 hover:bg-slate-50 font-bold text-xs border border-slate-200 flex items-center gap-2 transition-all shadow-sm active:scale-95"
+                >
+                  <SlidersHorizontal className="w-4 h-4 text-slate-700" />
+                  <span>Preferences</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={handleMarkAllRead}
+                  className="px-4 py-2.5 rounded-xl bg-slate-100 text-slate-800 hover:bg-slate-200 font-bold text-xs border border-slate-200 flex items-center gap-2 transition-all active:scale-95"
+                >
+                  <CheckCircle2 className="w-4 h-4 text-slate-900" />
+                  <span>Mark All as Read</span>
+                </button>
+              </div>
+            </div>
+
+            {/* Filter Pills and Unread Toggle */}
+            <div className="flex flex-wrap items-center justify-between gap-3 bg-white p-3.5 rounded-2xl border border-slate-200 shadow-sm">
+              <div className="flex flex-wrap items-center gap-1.5">
+                {[
+                  { id: 'ALL', label: 'All' },
+                  { id: 'ORDER', label: 'Orders' },
+                  { id: 'IN_TRANSIT', label: 'Logistics' },
+                  { id: 'SECURITY_ALERT', label: 'Security & SOS' },
+                  { id: 'INFO', label: 'Platform' },
+                ].map((tab) => (
+                  <button
+                    key={tab.id}
+                    onClick={() => {
+                      setNotifTypeFilter(tab.id);
+                      setNotifPage(1);
+                    }}
+                    className={`px-3 py-1.5 rounded-xl text-xs font-semibold transition-all ${
+                      notifTypeFilter === tab.id
+                        ? 'bg-black text-white shadow-sm'
+                        : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                    }`}
+                  >
+                    {tab.label}
+                  </button>
+                ))}
+              </div>
+
+              <label className="flex items-center gap-2 text-xs font-medium text-slate-700 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={notifUnreadOnly}
+                  onChange={(e) => {
+                    setNotifUnreadOnly(e.target.checked);
+                    setNotifPage(1);
+                  }}
+                  className="w-4 h-4 rounded text-black focus:ring-black border-slate-300 cursor-pointer"
+                />
+                <span>Unread Only</span>
+              </label>
             </div>
 
             <div className="bg-white p-6 sm:p-8 rounded-3xl border border-slate-200 space-y-4 shadow-sm">
@@ -763,7 +868,10 @@ function UserDashboardContent() {
                 notificationsList.map((notif) => {
                   let icon = CheckCircle2;
                   let colorClass = 'text-slate-900 bg-slate-100 border-slate-200';
-                  if (notif.type?.includes('REJECTED') || notif.type?.includes('CANCELLED')) {
+                  if (notif.type?.includes('COMMUTE') || notif.type?.includes('JOURNEY')) {
+                    icon = Compass;
+                    colorClass = 'text-emerald-800 bg-emerald-50 border-emerald-200';
+                  } else if (notif.type?.includes('REJECTED') || notif.type?.includes('CANCELLED')) {
                     icon = AlertTriangle;
                     colorClass = 'text-slate-900 bg-slate-100 border-slate-200';
                   } else if (notif.type?.includes('IN_TRANSIT') || notif.type?.includes('DISPATCHED')) {
@@ -818,7 +926,43 @@ function UserDashboardContent() {
                   );
                 })
               )}
+
+              {/* Pagination Controls */}
+              {notifTotalCount > notifPageSize && (
+                <div className="flex items-center justify-between pt-4 border-t border-slate-100 text-xs">
+                  <span className="text-slate-500">
+                    Showing {((notifPage - 1) * notifPageSize) + 1} to {Math.min(notifPage * notifPageSize, notifTotalCount)} of {notifTotalCount}
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <button
+                      disabled={notifPage <= 1}
+                      onClick={() => setNotifPage((p) => Math.max(1, p - 1))}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40 font-medium flex items-center gap-1"
+                    >
+                      <ChevronLeftIcon className="w-3.5 h-3.5" />
+                      <span>Previous</span>
+                    </button>
+                    <span className="font-bold text-slate-800">
+                      Page {notifPage} of {Math.ceil(notifTotalCount / notifPageSize)}
+                    </span>
+                    <button
+                      disabled={notifPage >= Math.ceil(notifTotalCount / notifPageSize)}
+                      onClick={() => setNotifPage((p) => p + 1)}
+                      className="px-3 py-1.5 rounded-lg border border-slate-200 text-slate-700 hover:bg-slate-50 disabled:opacity-40 font-medium flex items-center gap-1"
+                    >
+                      <span>Next</span>
+                      <ChevronRightIcon className="w-3.5 h-3.5" />
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
+
+            {/* Notification Preferences Modal */}
+            <NotificationPreferencesModal
+              isOpen={isPreferencesOpen}
+              onClose={() => setIsPreferencesOpen(false)}
+            />
           </div>
         )}
 
@@ -1060,6 +1204,28 @@ function UserDashboardContent() {
                   <span>Publish Offer / Listing →</span>
                 </button>
               </div>
+            </div>
+
+            {/* Commuter & Traveller Journey Registration Banner */}
+            <div className="bg-gradient-to-r from-slate-900 to-slate-800 text-white p-6 rounded-3xl border border-slate-700 shadow-sm flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <div className="flex items-center gap-2">
+                  <span className="px-2.5 py-0.5 rounded-full text-[10px] font-extrabold uppercase bg-emerald-500/20 text-emerald-300 border border-emerald-500/30">
+                    Commuter & Traveller Network
+                  </span>
+                </div>
+                <h3 className="text-xl font-extrabold text-white">Daily Commuter or Routine Traveller?</h3>
+                <p className="text-xs text-slate-300 max-w-xl leading-relaxed">
+                  Register your routine routes (daily, weekdays, or one-off journeys). Earn and help deliver urgent items along your path with zero continuous tracking.
+                </p>
+              </div>
+              <Link
+                href="/dashboard?tab=journeys"
+                className="px-5 py-3 rounded-2xl bg-white hover:bg-slate-100 text-slate-900 font-extrabold text-xs shadow-md flex items-center gap-2 transition-all shrink-0 hover:scale-[1.02]"
+              >
+                <Compass className="w-4 h-4 text-slate-900" />
+                <span>My Journeys & Routes →</span>
+              </Link>
             </div>
 
             {/* Popular Categories Bar */}

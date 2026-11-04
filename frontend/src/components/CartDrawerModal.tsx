@@ -2,7 +2,8 @@
 
 import React from 'react';
 import { useCart } from '@/context/CartContext';
-import { X, Trash2, ShoppingBag, Plus, Minus, ArrowRight, Layers, ArrowLeft, ShieldCheck, FileText } from 'lucide-react';
+import { X, Trash2, ShoppingBag, Plus, Minus, ArrowRight, Layers, ArrowLeft, ShieldCheck, FileText, AlertTriangle } from 'lucide-react';
+import { validateCart, CartValidationResponse } from '@/lib/api';
 import Link from 'next/link';
 
 interface CartDrawerModalProps {
@@ -28,6 +29,51 @@ export default function CartDrawerModal({
     cartTotal,
     cartCount,
   } = useCart();
+
+  const [serverValidation, setServerValidation] = React.useState<CartValidationResponse | null>(null);
+  const [validationError, setValidationError] = React.useState<string | null>(null);
+  const [isValidating, setIsValidating] = React.useState(false);
+
+  React.useEffect(() => {
+    if (!isOpen || cartItems.length === 0) {
+      setServerValidation(null);
+      setValidationError(null);
+      return;
+    }
+
+    const catalogItems = cartItems.filter((it) => it.catalogItemId);
+    if (catalogItems.length === 0) return;
+
+    let isMounted = true;
+    setIsValidating(true);
+    validateCart({
+      items: catalogItems.map((it) => ({
+        catalog_item_id: it.catalogItemId!,
+        quantity: it.quantity,
+        selected_optional_services: (it.selectedAddons || []).map((a) => a.id || a.title),
+      })),
+    })
+      .then((res) => {
+        if (!isMounted) return;
+        setServerValidation(res);
+        if (!res.is_valid) {
+          setValidationError(res.rejection_reason || 'Cart validation issue detected');
+        } else {
+          setValidationError(null);
+        }
+      })
+      .catch(() => {
+        if (!isMounted) return;
+        setValidationError(null);
+      })
+      .finally(() => {
+        if (isMounted) setIsValidating(false);
+      });
+
+    return () => {
+      isMounted = false;
+    };
+  }, [isOpen, cartItems]);
 
   // Lock background body scrolling ONLY when modal is open
   React.useEffect(() => {
@@ -320,6 +366,17 @@ export default function CartDrawerModal({
                 </div>
               </div>
 
+              {/* Server Validation Error Banner */}
+              {validationError && (
+                <div className="p-3 rounded-2xl bg-amber-50 border border-amber-300 flex items-start gap-2.5 text-amber-900 text-xs">
+                  <AlertTriangle className="w-4 h-4 text-amber-600 shrink-0 mt-0.5" />
+                  <div className="leading-snug">
+                    <span className="font-bold block">Checkout Restriction:</span>
+                    <span>{validationError}</span>
+                  </div>
+                </div>
+              )}
+
               {/* Action Buttons: Continue Shopping & Proceed to Checkout */}
               <div className="flex items-center gap-3">
                 <button
@@ -335,6 +392,7 @@ export default function CartDrawerModal({
                     if (typeof window !== 'undefined' && window.history.state?.modal === 'cart_drawer') {
                       window.history.back();
                     }
+                    if (validationError) return;
                     onClose();
                     if (onProceedToCheckout) {
                       onProceedToCheckout();

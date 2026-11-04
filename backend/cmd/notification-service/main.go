@@ -14,6 +14,7 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/uop/backend/internal/config"
 	"github.com/uop/backend/internal/event"
+	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
 )
 
@@ -21,6 +22,10 @@ func main() {
 	cfg := config.LoadConfig()
 
 	log.Printf("[Notification Service] Starting UOP Async Notifications Microservice [ENV: %s]...\n", cfg.Env)
+
+	dispatcher := service.NewNotificationDispatcher(nil)
+	dispatcher.Start(context.Background())
+	defer dispatcher.Stop()
 
 	eventBus := event.NewMemoryEventBus(1000)
 	defer eventBus.Close()
