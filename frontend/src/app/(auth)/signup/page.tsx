@@ -64,7 +64,7 @@ export default function UserSignupPage() {
         email: email,
       });
 
-      const devCode = res?.dev_otp_code || res?.user?.otp_code || '123456';
+      const devCode = res?.dev_otp_code || '';
       setDemoOtp(devCode);
       setStep('OTP');
     } catch (err: any) {

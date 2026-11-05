@@ -793,7 +793,7 @@ function AdminUserManagementContent() {
               </span>
             </h1>
             <p className="text-slate-600 text-xs sm:text-sm mt-1">
-              Admin Login: <strong className="text-slate-900 font-mono">+919999999999</strong> | Dev OTP: <strong className="text-slate-900 font-mono">123456</strong>
+              Admin Login: <strong className="text-slate-900 font-mono">+919999999999</strong>
             </p>
           </div>
 
@@ -2931,7 +2931,7 @@ function AdminUserManagementContent() {
                   <CheckCircle className="w-10 h-10 text-emerald-600 mx-auto" />
                   <h4 className="font-bold text-slate-900 text-base">User Created & OTP Dispatched!</h4>
                   <div className="p-3 rounded-xl bg-white text-left space-y-1 font-mono text-xs border border-slate-200">
-                    <div className="text-slate-600">Mobile OTP Code: <strong className="text-emerald-700 text-sm">{inviteResult.otp_code || '123456'}</strong></div>
+                    <div className="text-slate-600">Mobile OTP Code: <strong className="text-emerald-700 text-sm">{inviteResult.otp_code || 'Dispatched via SMS'}</strong></div>
                     <div className="text-slate-600">Phone: {inviteResult.phone}</div>
                   </div>
                 </div>

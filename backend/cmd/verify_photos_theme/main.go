@@ -40,7 +40,7 @@ func main() {
 	catalogRepo := postgres.NewCatalogRepository(pgDB)
 	catalogService := service.NewCatalogService(catalogRepo, userRepo)
 	catalogHandler := handler.NewCatalogHandler(catalogService, userRepo)
-	uploadHandler := handler.NewUploadHandler("./public/uploads")
+	uploadHandler := handler.NewUploadHandler("./public/uploads", "", nil)
 
 	r := chi.NewRouter()
 	r.Route("/api/v1", func(r chi.Router) {

@@ -3,13 +3,11 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -27,51 +25,26 @@ func NewCheckoutHandler(checkoutService *service.CheckoutService, userRepo *post
 	}
 }
 
-// resolveUser retrieves user from JWT claims, request header/body fallback, or local dev default
+// resolveUser returns the verified caller. explicitUserID (from a request body)
+// is never trusted: it must match the caller unless the caller is an admin.
 func (h *CheckoutHandler) resolveUser(r *http.Request, explicitUserID string) *domain.User {
-	if h.userRepo == nil {
+	caller, err := authz.CurrentUser(r)
+	if err != nil {
 		return nil
 	}
-
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID); u != nil {
-			return u
-		}
-		if uid, err := uuid.Parse(claims.SupabaseUID); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-				return u
+	if explicitUserID == "" || explicitUserID == caller.ID.String() {
+		return caller
+	}
+	if !caller.IsAdmin() {
+		return nil
+	}
+	if h.userRepo != nil {
+		if uid, perr := uuid.Parse(explicitUserID); perr == nil {
+			if target, _ := h.userRepo.GetByID(r.Context(), uid); target != nil {
+				return target
 			}
 		}
 	}
-
-	if explicitUserID != "" {
-		if uid, err := uuid.Parse(explicitUserID); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-				return u
-			}
-		}
-	}
-
-	headerUID := r.Header.Get("X-User-ID")
-	if headerUID != "" {
-		if uid, err := uuid.Parse(headerUID); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-				return u
-			}
-		}
-	}
-
-	// Local development fallback only when NOT in production
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-		users, err := h.userRepo.ListUsers(r.Context())
-		if err == nil && len(users) > 0 {
-			return users[0]
-		}
-	}
-
 	return nil
 }
 

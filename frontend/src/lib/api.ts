@@ -1,5 +1,15 @@
 export const API_BASE_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8080/api/v1';
 
+import {
+  getAccessToken,
+  storeTokens,
+  clearAllSessionStorage,
+  getRefreshToken,
+  hasStoredTokens,
+} from './authSession';
+
+export const isAdminRole = (role?: string): boolean => role === 'ADMIN' || role === 'SUPER_ADMIN';
+
 export interface UserProfile {
   id: string;
   supabase_uid: string;
@@ -320,21 +330,8 @@ export async function getOpportunityByID(id: string): Promise<Opportunity | null
 
 // Helper to retrieve auth token from browser session
 export function getStoredAuthToken(): string {
-  if (typeof window === 'undefined') return '00000000-0000-0000-0000-000000000001';
-  try {
-    const directToken = localStorage.getItem('uop_token') || localStorage.getItem('uop_access_token');
-    if (directToken && directToken.trim() !== '') return directToken;
-    const userStr = localStorage.getItem('uop_user') || localStorage.getItem('uop_user_profile');
-    if (userStr) {
-      const u = JSON.parse(userStr);
-      if (u.token) return u.token;
-      if (u.supabase_uid) return u.supabase_uid;
-      if (u.id) return u.id;
-    }
-  } catch {
-    // fallback
-  }
-  return '00000000-0000-0000-0000-000000000001';
+  if (typeof window === 'undefined') return '';
+  return getAccessToken();
 }
 
 // Authenticated API helper (uses Supabase JWT Token or session token)
@@ -558,18 +555,14 @@ export async function inviteUser(payload: { full_name: string; phone: string; em
   return json.data;
 }
 
-export async function signupUser(payload: { full_name: string; phone: string; email?: string }): Promise<{ user: UserProfile; dev_otp_code?: string } | null> {
-  const res = await fetch(`${API_BASE_URL}/auth/signup`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(await res.text());
-  const json = await res.json();
-  return json.data;
+export interface RequestOTPResponse {
+  otp_sent: boolean;
+  expires_in?: number;
+  dev_otp_code?: string;
+  user?: UserProfile;
 }
 
-export async function requestOTP(phone: string): Promise<{ user: UserProfile; dev_otp_code?: string } | null> {
+export async function requestOTP(phone: string): Promise<RequestOTPResponse> {
   try {
     const res = await fetch(`${API_BASE_URL}/auth/request-otp`, {
       method: 'POST',
@@ -578,7 +571,14 @@ export async function requestOTP(phone: string): Promise<{ user: UserProfile; de
     });
     if (!res.ok) {
       const errJson = await res.json().catch(() => null);
-      throw new Error(errJson?.message || errJson?.error || 'Failed to request OTP code');
+      const retryAfter = res.headers.get('Retry-After');
+      let msg = errJson?.message || errJson?.error || 'Failed to request OTP code';
+      if (res.status === 429 && retryAfter) {
+        msg = `${msg} (Please wait ${retryAfter}s before retrying)`;
+      } else if (res.status === 503) {
+        msg = 'SMS delivery service is currently unavailable. Please try again later or contact support.';
+      }
+      throw new Error(msg);
     }
     const json = await res.json();
     return json.data;
@@ -590,6 +590,34 @@ export async function requestOTP(phone: string): Promise<{ user: UserProfile; de
   }
 }
 
+export interface SignupResponse {
+  otp_sent: boolean;
+  expires_in?: number;
+  dev_otp_code?: string;
+  user?: UserProfile;
+}
+
+export async function signupUser(payload: { full_name: string; phone: string; email?: string }): Promise<SignupResponse> {
+  const res = await fetch(`${API_BASE_URL}/auth/signup`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(payload),
+  });
+  if (!res.ok) {
+    const errJson = await res.json().catch(() => null);
+    const retryAfter = res.headers.get('Retry-After');
+    let msg = errJson?.message || errJson?.error || await res.text();
+    if (res.status === 429 && retryAfter) {
+      msg = `${msg} (Please wait ${retryAfter}s before retrying)`;
+    } else if (res.status === 503) {
+      msg = 'SMS delivery service is currently unavailable. Please try again later or contact support.';
+    }
+    throw new Error(msg);
+  }
+  const json = await res.json();
+  return json.data;
+}
+
 export async function verifyOTP(phone: string, otpCode: string): Promise<UserProfile | null> {
   try {
     const res = await fetch(`${API_BASE_URL}/users/verify-otp`, {
@@ -599,10 +627,26 @@ export async function verifyOTP(phone: string, otpCode: string): Promise<UserPro
     });
     if (!res.ok) {
       const errJson = await res.json().catch(() => null);
-      throw new Error(errJson?.message || errJson?.error || 'Failed to verify OTP code');
+      let msg = errJson?.message || errJson?.error || 'Failed to verify OTP code';
+      if (res.status === 429) {
+        msg = `${msg} (Too many attempts. Please request a new code or try again later.)`;
+      }
+      throw new Error(msg);
     }
     const json = await res.json();
-    return json.data;
+    const data = json.data;
+    if (data?.access_token) {
+      storeTokens({
+        access_token: data.access_token,
+        refresh_token: data.refresh_token,
+        expires_in: data.expires_in,
+      });
+    }
+    const user: UserProfile = data?.user || data;
+    if (user) {
+      saveUserSession(user, data?.access_token);
+    }
+    return user;
   } catch (err: any) {
     if (err.name === 'TypeError' || err.message?.includes('fetch')) {
       throw new Error('Backend API connection failed (http://localhost:8080). Please ensure the backend server is running.');
@@ -770,12 +814,25 @@ export async function updateCategoryResources(categoryId: string, resources: Res
   return json.data;
 }
 
-export async function uploadFile(file: File): Promise<{ url: string; filename: string; mimetype: string; size_bytes: number }> {
+export async function uploadFile(
+  file: File,
+  purpose?: string
+): Promise<{ url: string; filename: string; mimetype: string; size_bytes: number; is_private?: boolean }> {
   const formData = new FormData();
   formData.append('file', file);
+  if (purpose) {
+    formData.append('purpose', purpose);
+  }
+
+  const token = getStoredAuthToken();
+  const headers: Record<string, string> = {};
+  if (token) {
+    headers['Authorization'] = `Bearer ${token}`;
+  }
 
   const res = await fetch(`${API_BASE_URL}/upload`, {
     method: 'POST',
+    headers,
     body: formData,
   });
 
@@ -786,6 +843,38 @@ export async function uploadFile(file: File): Promise<{ url: string; filename: s
 
   const json = await res.json();
   return json.data;
+}
+
+export async function getSignedFileUrl(fileUrl: string): Promise<string> {
+  if (!fileUrl) return '';
+  const match = fileUrl.match(/\/files\/private\/([^/]+)\/([^/?#]+)/);
+  if (match) {
+    const [, owner, name] = match;
+    try {
+      const token = getStoredAuthToken();
+      const res = await fetch(`${API_BASE_URL}/files/private/${encodeURIComponent(owner)}/${encodeURIComponent(name)}/signed-url`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+      });
+      if (res.ok) {
+        const json = await res.json();
+        const signedPath = json?.data?.signed_url;
+        if (signedPath) {
+          if (fileUrl.startsWith('http://') || fileUrl.startsWith('https://')) {
+            const origin = new URL(fileUrl).origin;
+            return `${origin}${signedPath}`;
+          }
+          return signedPath;
+        }
+      }
+    } catch {
+      // fallback to original
+    }
+  }
+  return fileUrl;
 }
 
 // Scenario 1: Logistics & Emergency API Interfaces
@@ -1331,19 +1420,12 @@ export function saveUserSession(user: UserProfile, token?: string): void {
   if (user.id) localStorage.setItem('uop_user_id', user.id);
   if (user.phone) localStorage.setItem('uop_phone', user.phone);
   if (token) {
-    localStorage.setItem('uop_token', token);
-    localStorage.setItem('uop_access_token', token);
+    storeTokens({ access_token: token });
   }
 }
 
 export function clearUserSession(): void {
-  if (typeof window === 'undefined') return;
-  localStorage.removeItem('uop_user');
-  localStorage.removeItem('uop_user_profile');
-  localStorage.removeItem('uop_user_id');
-  localStorage.removeItem('uop_phone');
-  localStorage.removeItem('uop_token');
-  localStorage.removeItem('uop_access_token');
+  clearAllSessionStorage();
 }
 
 export interface AdditionalServiceItem {

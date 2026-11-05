@@ -8,8 +8,9 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
+	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
 )
 
@@ -17,34 +18,18 @@ import (
 // PHASE 6: ORDER FULFILMENT & LOGISTICS HTTP HANDLERS
 // ============================================================================
 
-// Helper to extract authenticated user ID from context or header
+// getUserIDFromRequest returns the VERIFIED caller's ID (uuid.Nil when
+// unauthenticated). It never reads identity from headers or query strings.
 func getUserIDFromRequest(r *http.Request) uuid.UUID {
-	if claims, ok := middleware.GetUserClaims(r.Context()); ok && claims != nil {
-		if id, err := uuid.Parse(claims.SupabaseUID); err == nil && id != uuid.Nil {
-			return id
-		}
-	}
-	if headerUID := r.Header.Get("X-User-ID"); headerUID != "" {
-		if id, err := uuid.Parse(headerUID); err == nil {
-			return id
-		}
-	}
-	return uuid.Nil
+	return authz.CurrentUserID(r)
 }
 
 // 1. GetVendorOrders handles GET /api/v1/vendor/orders
 func (h *LogisticsHandler) GetVendorOrders(w http.ResponseWriter, r *http.Request) {
-	vendorID := getUserIDFromRequest(r)
+	// The vendor is the verified caller (admins may name one with ?vendor_id=).
+	vendorID := h.vendorFromRequest(r)
 	if vendorID == uuid.Nil {
-		// Also allow query param for dev flexibility
-		if qUID := r.URL.Query().Get("vendor_id"); qUID != "" {
-			if id, err := uuid.Parse(qUID); err == nil {
-				vendorID = id
-			}
-		}
-	}
-	if vendorID == uuid.Nil {
-		response.Error(w, http.StatusUnauthorized, "Vendor authentication required (missing X-User-ID or vendor_id)", nil)
+		response.Error(w, http.StatusUnauthorized, "Authentication required", nil)
 		return
 	}
 
@@ -75,16 +60,9 @@ func (h *LogisticsHandler) GetVendorOrderDetail(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	vendorID := getUserIDFromRequest(r)
+	vendorID := h.vendorFromRequest(r)
 	if vendorID == uuid.Nil {
-		if qUID := r.URL.Query().Get("vendor_id"); qUID != "" {
-			if id, err := uuid.Parse(qUID); err == nil {
-				vendorID = id
-			}
-		}
-	}
-	if vendorID == uuid.Nil {
-		response.Error(w, http.StatusUnauthorized, "Vendor authentication required", nil)
+		response.Error(w, http.StatusUnauthorized, "Authentication required", nil)
 		return
 	}
 
@@ -106,7 +84,7 @@ func (h *LogisticsHandler) ExecuteVendorAction(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	vendorID := getUserIDFromRequest(r)
+	vendorID := h.vendorFromRequest(r)
 	var req domain.VendorOrderActionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid JSON payload", err.Error())
@@ -114,14 +92,7 @@ func (h *LogisticsHandler) ExecuteVendorAction(w http.ResponseWriter, r *http.Re
 	}
 
 	if vendorID == uuid.Nil {
-		if qUID := r.URL.Query().Get("vendor_id"); qUID != "" {
-			if id, err := uuid.Parse(qUID); err == nil {
-				vendorID = id
-			}
-		}
-	}
-	if vendorID == uuid.Nil {
-		response.Error(w, http.StatusUnauthorized, "Vendor authentication required", nil)
+		response.Error(w, http.StatusUnauthorized, "Authentication required", nil)
 		return
 	}
 
@@ -161,6 +132,13 @@ func (h *LogisticsHandler) AssignDriverAndVehicle(w http.ResponseWriter, r *http
 		return
 	}
 
+	if _, ok := h.requireOrderRole(w, r, req.OpportunityID, service.RoleOrderProvider); !ok {
+		return
+	}
+	if !h.checkDriverAssignable(w, r, req.DriverID) {
+		return
+	}
+
 	pairing, err := h.logisticsService.AssignDriverAndVehicle(r.Context(), &req)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, err.Error(), nil)
@@ -193,6 +171,10 @@ func (h *LogisticsHandler) GenerateOrGetWayManifest(w http.ResponseWriter, r *ht
 	oppID, err := uuid.Parse(payload.OpportunityID)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid opportunity_id", err.Error())
+		return
+	}
+
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderProvider); !ok {
 		return
 	}
 
@@ -239,6 +221,10 @@ func (h *LogisticsHandler) RegisterProofOfLoading(w http.ResponseWriter, r *http
 		return
 	}
 
+	if _, ok := h.requireOrderRole(w, r, req.OpportunityID, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
+		return
+	}
+
 	manifest, err := h.logisticsService.RegisterProofOfLoading(r.Context(), &req)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, err.Error(), nil)
@@ -253,6 +239,10 @@ func (h *LogisticsHandler) RegisterProofOfDelivery(w http.ResponseWriter, r *htt
 	var req domain.ProofOfDeliveryRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid JSON payload", err.Error())
+		return
+	}
+
+	if _, ok := h.requireOrderRole(w, r, req.OpportunityID, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
 		return
 	}
 
@@ -311,7 +301,11 @@ func (h *LogisticsHandler) VerifySecureDeliveryOTP(w http.ResponseWriter, r *htt
 		return
 	}
 
-	verifiedBy := getUserIDFromRequest(r)
+	caller, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderOwner, service.RoleOrderProvider, service.RoleOrderDriver)
+	if !ok {
+		return
+	}
+	verifiedBy := caller.ID
 	var vByPtr *uuid.UUID
 	if verifiedBy != uuid.Nil {
 		vByPtr = &verifiedBy
@@ -337,9 +331,12 @@ func (h *LogisticsHandler) SubmitSOSIncident(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	if req.ReporterID == uuid.Nil {
-		req.ReporterID = getUserIDFromRequest(r)
+	// The reporter is the verified caller (driver or provider on the order).
+	caller, ok := h.requireOrderRole(w, r, req.OpportunityID, service.RoleOrderProvider, service.RoleOrderDriver)
+	if !ok {
+		return
 	}
+	req.ReporterID = caller.ID
 
 	inc, err := h.logisticsService.SubmitSOSIncident(r.Context(), &req)
 	if err != nil {
@@ -355,6 +352,10 @@ func (h *LogisticsHandler) ResolveSOSIncident(w http.ResponseWriter, r *http.Req
 	var req domain.SOSResolutionRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid JSON payload", err.Error())
+		return
+	}
+
+	if !h.authorizeIncident(w, r, req.IncidentID) {
 		return
 	}
 
@@ -387,7 +388,11 @@ func (h *LogisticsHandler) TransitionOrderStatus(w http.ResponseWriter, r *http.
 		return
 	}
 
-	userID := getUserIDFromRequest(r)
+	caller, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderOwner, service.RoleOrderProvider, service.RoleOrderDriver)
+	if !ok {
+		return
+	}
+	userID := caller.ID
 	var uPtr *uuid.UUID
 	if userID != uuid.Nil {
 		uPtr = &userID

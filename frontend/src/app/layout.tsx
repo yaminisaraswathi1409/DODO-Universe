@@ -1,6 +1,7 @@
 import type { Metadata, Viewport } from 'next';
 import '../styles/globals.css';
 import { CartProvider } from '@/context/CartContext';
+import AuthFetchInstaller from '@/components/AuthFetchInstaller';
 
 export const metadata: Metadata = {
   title: 'Universal Opportunity Platform | AI Voice-First Ecosystem',
@@ -64,6 +65,7 @@ export default function RootLayout({
         />
       </head>
       <body className="bg-slate-50 text-slate-900 antialiased min-h-screen flex flex-col selection:bg-black selection:text-white">
+        <AuthFetchInstaller />
         <CartProvider>{children}</CartProvider>
       </body>
     </html>

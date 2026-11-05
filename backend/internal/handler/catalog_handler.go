@@ -2,14 +2,13 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
 	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
@@ -221,29 +220,12 @@ func (h *CatalogHandler) CreateCatalogItem(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	// Resolve target Vendor User
-	var vendorUser *domain.User
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		vendorUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+	// The vendor is the verified caller (admins may name another vendor).
+	vendorID, ok := h.resolveVendorID(w, r, payload.VendorUserID, uuid.Nil)
+	if !ok {
+		return
 	}
-	if vendorUser == nil && payload.VendorUserID != "" {
-		vUID, parseErr := uuid.Parse(payload.VendorUserID)
-		if parseErr == nil {
-			vendorUser, _ = h.userRepo.GetByID(r.Context(), vUID)
-		}
-	}
-	if vendorUser == nil {
-		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-		appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-		if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-			users, err := h.userRepo.ListUsers(r.Context())
-			if err == nil && len(users) > 0 {
-				vendorUser = users[0]
-			}
-		}
-	}
-
+	vendorUser, _ := h.userRepo.GetByID(r.Context(), vendorID)
 	if vendorUser == nil {
 		response.Error(w, http.StatusBadRequest, "Vendor profile not found", nil)
 		return
@@ -423,24 +405,13 @@ func (h *CatalogHandler) MoveCatalogNode(w http.ResponseWriter, r *http.Request)
 		return
 	}
 
-	var vendorUID uuid.UUID
-	if payload.VendorUserID != "" {
-		vendorUID, _ = uuid.Parse(payload.VendorUserID)
+	var adminFallback uuid.UUID
+	if existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID); getErr == nil && existing != nil {
+		adminFallback = existing.VendorUserID
 	}
-	if vendorUID == uuid.Nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok && claims.SupabaseUID != "" {
-			vUser, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-			if vUser != nil {
-				vendorUID = vUser.ID
-			}
-		}
-	}
-	if vendorUID == uuid.Nil {
-		existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
-		if getErr == nil && existing != nil {
-			vendorUID = existing.VendorUserID
-		}
+	vendorUID, ok := h.resolveVendorID(w, r, payload.VendorUserID, adminFallback)
+	if !ok {
+		return
 	}
 
 	var newParentID *uuid.UUID
@@ -473,18 +444,9 @@ func (h *CatalogHandler) ReorderCatalogNodes(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	var vendorUID uuid.UUID
-	if payload.VendorUserID != "" {
-		vendorUID, _ = uuid.Parse(payload.VendorUserID)
-	}
-	if vendorUID == uuid.Nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok && claims.SupabaseUID != "" {
-			vUser, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-			if vUser != nil {
-				vendorUID = vUser.ID
-			}
-		}
+	vendorUID, ok := h.resolveVendorID(w, r, payload.VendorUserID, uuid.Nil)
+	if !ok {
+		return
 	}
 
 	var parentID *uuid.UUID
@@ -512,33 +474,35 @@ func (h *CatalogHandler) ReorderCatalogNodes(w http.ResponseWriter, r *http.Requ
 }
 
 func (h *CatalogHandler) requireAdmin(r *http.Request) (*domain.User, error) {
-	if h.userRepo == nil {
-		return nil, fmt.Errorf("user repository unavailable")
+	return authz.RequireAdmin(r)
+}
+
+// resolveVendorID returns the vendor a catalog action applies to. It is the
+// verified caller. An admin may act for another vendor by naming one in
+// vendor_user_id (or, if none is named, for adminFallback when provided). A
+// non-admin naming anybody else is rejected: ownership never comes from the
+// request body.
+func (h *CatalogHandler) resolveVendorID(w http.ResponseWriter, r *http.Request, claimed string, adminFallback uuid.UUID) (uuid.UUID, bool) {
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
+		return uuid.Nil, false
 	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
+	if claimed == "" {
+		if caller.IsAdmin() && adminFallback != uuid.Nil {
+			return adminFallback, true
 		}
+		return caller.ID, true
 	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil && u.Role == domain.RoleAdmin {
-				return u, nil
-			}
-		}
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
+	id, perr := uuid.Parse(claimed)
+	if perr != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid vendor_user_id", nil)
+		return uuid.Nil, false
 	}
-	return nil, fmt.Errorf("admin credentials required")
+	if id != caller.ID && !caller.IsAdmin() {
+		response.Error(w, http.StatusForbidden, "Unauthorized: you cannot act for another vendor", nil)
+		return uuid.Nil, false
+	}
+	return id, true
 }
 
 // ListAdminCatalogRequests handles GET /api/v1/admin/catalog/requests
@@ -697,9 +661,9 @@ func (h *CatalogHandler) ArchiveCatalogItem(w http.ResponseWriter, r *http.Reque
 	}
 	_ = json.NewDecoder(r.Body).Decode(&payload)
 
-	var vendorUID uuid.UUID
-	if payload.VendorUserID != "" {
-		vendorUID, _ = uuid.Parse(payload.VendorUserID)
+	vendorUID, ok := h.resolveVendorID(w, r, payload.VendorUserID, uuid.Nil)
+	if !ok {
+		return
 	}
 
 	err = h.catalogService.ArchiveCatalogItem(r.Context(), itemID, vendorUID)
@@ -748,30 +712,16 @@ func (h *CatalogHandler) UpdateCatalogItem(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	var vendorUID uuid.UUID
-	var vUser *domain.User
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		vUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if vUser != nil {
-			vendorUID = vUser.ID
-		}
-	}
-	if vendorUID == uuid.Nil && payload.VendorUserID != "" {
-		parsed, parseErr := uuid.Parse(payload.VendorUserID)
-		if parseErr == nil {
-			vendorUID = parsed
-		}
-	}
 	existing, getErr := h.catalogService.GetCatalogItemByID(r.Context(), itemID)
 	if getErr != nil || existing == nil {
 		response.Error(w, http.StatusNotFound, "Catalog item not found", nil)
 		return
 	}
-	if vendorUID == uuid.Nil {
-		vendorUID = existing.VendorUserID
+	vendorUID, ok := h.resolveVendorID(w, r, payload.VendorUserID, existing.VendorUserID)
+	if !ok {
+		return
 	}
-	if vUser != nil && vUser.Role != domain.RoleAdmin && existing.VendorUserID != vUser.ID {
+	if existing.VendorUserID != vendorUID {
 		response.Error(w, http.StatusForbidden, "Unauthorized: you do not have permission to modify another vendor's catalog item", nil)
 		return
 	}
@@ -819,10 +769,8 @@ func (h *CatalogHandler) DeleteCatalogItem(w http.ResponseWriter, r *http.Reques
 		return
 	}
 
-	vendorUserIDStr := r.URL.Query().Get("vendor_user_id")
-	vendorUID, err := uuid.Parse(vendorUserIDStr)
-	if err != nil {
-		response.Error(w, http.StatusBadRequest, "Invalid vendor_user_id query param", err.Error())
+	vendorUID, ok := h.resolveVendorID(w, r, r.URL.Query().Get("vendor_user_id"), uuid.Nil)
+	if !ok {
 		return
 	}
 

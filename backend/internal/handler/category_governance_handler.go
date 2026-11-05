@@ -2,14 +2,12 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -25,60 +23,13 @@ func NewCategoryGovernanceHandler(govService *service.CategoryGovernanceService,
 }
 
 func (h *CategoryGovernanceHandler) requireAdmin(r *http.Request) (*domain.User, error) {
-	if h.userRepo == nil {
-		return nil, fmt.Errorf("user repository unavailable")
-	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil && u.Role == domain.RoleAdmin {
-				return u, nil
-			}
-		}
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	return nil, fmt.Errorf("admin credentials required")
+	return authz.RequireAdmin(r)
 }
 
+// authorizeVendor allows the vendor themself or an admin. It fails closed.
 func (h *CategoryGovernanceHandler) authorizeVendor(r *http.Request, targetVendorID uuid.UUID) bool {
-	if h.userRepo == nil {
-		return true
-	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil {
-			return u.Role == domain.RoleAdmin || u.ID == targetVendorID
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-				return u.Role == domain.RoleAdmin || u.ID == targetVendorID
-			}
-		}
-	}
-	return true
+	_, err := authz.RequireSelfOrAdmin(r, targetVendorID)
+	return err == nil
 }
 
 // ----------------------------------------------------------------------------

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"log"
 	"strings"
 	"time"
 
@@ -75,41 +74,6 @@ func (r *UserRepository) UpsertUser(ctx context.Context, u *domain.User) (*domai
 	return r.scanUserRow(row)
 }
 
-func (r *UserRepository) InviteUser(ctx context.Context, inviterID uuid.UUID, fullName, phone, email string, role domain.UserRole, otpCode string, expiresAt time.Time) (*domain.User, error) {
-	supabaseUID := fmt.Sprintf("invited_%s_%d", uuid.New().String()[:8], time.Now().Unix())
-	query := `
-		INSERT INTO users (supabase_uid, email, phone, full_name, status, role, otp_code, otp_expires_at, invited_by, invited_at)
-		VALUES ($1, NULLIF($2, ''), $3, $4, 'PENDING', $5, $6, $7, $8, NOW())
-		RETURNING id, supabase_uid, COALESCE(email, ''), COALESCE(phone, ''), full_name, COALESCE(avatar_url, ''), COALESCE(bio, ''), 
-		          COALESCE(ST_Y(location::geometry), 0.0) as lat, COALESCE(ST_X(location::geometry), 0.0) as lng, COALESCE(address_text, ''), COALESCE(aadhaar_number, ''), trust_score, is_verified,
-		          status, role, mobile_verified, COALESCE(otp_code, ''), otp_expires_at, face_verified, face_verified_at, COALESCE(face_verification_ref, ''),
-		          invited_by, invited_at, created_at, updated_at;
-	`
-	row := r.db.Pool.QueryRow(ctx, query, supabaseUID, email, phone, fullName, role, otpCode, expiresAt, inviterID)
-	return r.scanUserRow(row)
-}
-
-func (r *UserRepository) VerifyOTP(ctx context.Context, phone, otpCode string) (*domain.User, error) {
-	query := `
-		UPDATE users
-		SET mobile_verified = TRUE,
-		    status = CASE WHEN status = 'PENDING' THEN 'OTP_VERIFIED' ELSE status END,
-		    otp_code = NULL,
-		    updated_at = NOW()
-		WHERE phone = $1 AND otp_code = $2 AND (otp_expires_at IS NULL OR otp_expires_at > NOW())
-		RETURNING id, supabase_uid, COALESCE(email, ''), COALESCE(phone, ''), full_name, COALESCE(avatar_url, ''), COALESCE(bio, ''), 
-		          COALESCE(ST_Y(location::geometry), 0.0) as lat, COALESCE(ST_X(location::geometry), 0.0) as lng, COALESCE(address_text, ''), COALESCE(aadhaar_number, ''), trust_score, is_verified,
-		          status, role, mobile_verified, COALESCE(otp_code, ''), otp_expires_at, face_verified, face_verified_at, COALESCE(face_verification_ref, ''),
-		          invited_by, invited_at, created_at, updated_at;
-	`
-	row := r.db.Pool.QueryRow(ctx, query, phone, otpCode)
-	user, err := r.scanUserRow(row)
-	if err != nil {
-		return nil, fmt.Errorf("invalid or expired OTP code: %w", err)
-	}
-
-	return r.ActivateIfEligible(ctx, user.ID)
-}
 
 func (r *UserRepository) CompleteProfile(ctx context.Context, userID uuid.UUID, avatarURL, bio, addressText, aadhaarNumber string, lat, lng float64) (*domain.User, error) {
 	query := `
@@ -415,117 +379,6 @@ func (r *UserRepository) CreateOrGetByPhone(ctx context.Context, phone string) (
 }
 
 
-func (r *UserRepository) CreateOTPRecord(ctx context.Context, phone, otpCode string, expiresAt time.Time) (*domain.User, error) {
-	normPhone := NormalizePhone(phone)
-	otpCode = strings.TrimSpace(otpCode)
-
-	// 1. Ensure user exists
-	user, err := r.CreateOrGetByPhone(ctx, normPhone)
-	if err != nil || user == nil {
-		return nil, fmt.Errorf("failed to auto-create or fetch user for phone %s: %v", normPhone, err)
-	}
-
-	// 2. Insert record into user_otps table
-	otpQuery := `
-		INSERT INTO user_otps (phone, otp_code, expires_at, is_verified, attempts)
-		VALUES ($1, $2, $3, FALSE, 0);
-	`
-	_, err = r.db.Pool.Exec(ctx, otpQuery, user.Phone, otpCode, expiresAt)
-	if err != nil {
-		log.Printf("[USER REPO WARN] Insert user_otps warning: %v\n", err)
-	}
-
-	// 3. Update user table by Primary Key ID
-	updateQuery := `
-		UPDATE users
-		SET otp_code = $2,
-		    otp_expires_at = $3,
-		    updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, supabase_uid, COALESCE(email, ''), COALESCE(phone, ''), full_name, COALESCE(avatar_url, ''), COALESCE(bio, ''), 
-		          COALESCE(ST_Y(location::geometry), 0.0) as lat, COALESCE(ST_X(location::geometry), 0.0) as lng, COALESCE(address_text, ''), COALESCE(aadhaar_number, ''), trust_score, is_verified,
-		          status, role, mobile_verified, COALESCE(otp_code, ''), otp_expires_at, face_verified, face_verified_at, COALESCE(face_verification_ref, ''),
-		          invited_by, invited_at, created_at, updated_at;
-	`
-	row := r.db.Pool.QueryRow(ctx, updateQuery, user.ID, otpCode, expiresAt)
-	return r.scanUserRow(row)
-}
-
-
-func (r *UserRepository) VerifyOTPRecord(ctx context.Context, phone, otpCode string, isDevMode bool) (*domain.User, error) {
-	phone = strings.TrimSpace(phone)
-	otpCode = strings.TrimSpace(otpCode)
-
-	// 1. Fetch user record with flexible phone matching (+91... vs 9876...)
-	user, err := r.GetByPhone(ctx, phone)
-	if err != nil || user == nil {
-		cleanPhone := strings.TrimPrefix(phone, "+")
-		user, err = r.GetByPhone(ctx, cleanPhone)
-		if err != nil || user == nil {
-			user, err = r.GetByPhone(ctx, "+"+cleanPhone)
-		}
-	}
-
-	if user == nil {
-		log.Printf("[VERIFY OTP DEBUG] User not found for input phone: '%s'\n", phone)
-		return nil, fmt.Errorf("user with mobile phone number %s not found", phone)
-	}
-
-	log.Printf("[VERIFY OTP DEBUG] Found user ID: %s, Phone: '%s', Stored OTPCode: '%s', Input OTPCode: '%s', isDevMode: %t\n",
-		user.ID, user.Phone, user.OTPCode, otpCode, isDevMode)
-
-	// 2. Validate OTP code against dev bypass (123456/777888), stored user.OTPCode, or user_otps table
-	isValid := (isDevMode && (otpCode == "123456" || otpCode == "777888")) ||
-		(user.OTPCode != "" && user.OTPCode == otpCode)
-
-
-	if !isValid {
-		var count int
-		cleanP := strings.ReplaceAll(phone, "+", "")
-		otpCheckQuery := `
-			SELECT COUNT(*) FROM user_otps
-			WHERE (phone = $1 OR phone = $2 OR REPLACE(phone, '+', '') = $3)
-			  AND otp_code = $4 AND is_verified = FALSE;
-		`
-		_ = r.db.Pool.QueryRow(ctx, otpCheckQuery, phone, user.Phone, cleanP, otpCode).Scan(&count)
-		if count > 0 {
-			isValid = true
-		}
-	}
-
-	if !isValid {
-		return nil, fmt.Errorf("invalid or expired OTP code")
-	}
-
-	// 3. Promote user status to OTP_VERIFIED
-	updateUserQuery := `
-		UPDATE users
-		SET mobile_verified = TRUE,
-		    status = CASE WHEN status = 'PENDING' THEN 'OTP_VERIFIED' ELSE status END,
-		    otp_code = NULL,
-		    updated_at = NOW()
-		WHERE id = $1
-		RETURNING id, supabase_uid, COALESCE(email, ''), COALESCE(phone, ''), full_name, COALESCE(avatar_url, ''), COALESCE(bio, ''), 
-		          COALESCE(ST_Y(location::geometry), 0.0) as lat, COALESCE(ST_X(location::geometry), 0.0) as lng, COALESCE(address_text, ''), COALESCE(aadhaar_number, ''), trust_score, is_verified,
-		          status, role, mobile_verified, COALESCE(otp_code, ''), otp_expires_at, face_verified, face_verified_at, COALESCE(face_verification_ref, ''),
-		          invited_by, invited_at, created_at, updated_at;
-	`
-	row := r.db.Pool.QueryRow(ctx, updateUserQuery, user.ID)
-	updatedUser, err := r.scanUserRow(row)
-	if err != nil || updatedUser == nil {
-		return nil, fmt.Errorf("failed to update user status")
-	}
-
-	// 4. Mark user_otps record as verified
-	markOTPQuery := `
-		UPDATE user_otps
-		SET is_verified = TRUE, updated_at = NOW()
-		WHERE (phone = $1 OR phone = $2) AND is_verified = FALSE;
-	`
-	_, _ = r.db.Pool.Exec(ctx, markOTPQuery, phone, user.Phone)
-
-	return r.ActivateIfEligible(ctx, updatedUser.ID)
-}
 
 func (r *UserRepository) scanUserSkillAssetRow(row pgx.Row) (*domain.UserSkillAsset, error) {
 	var asset domain.UserSkillAsset

@@ -4,15 +4,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"os"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -69,36 +68,22 @@ func (h *OpportunityHandler) Create(w http.ResponseWriter, r *http.Request) {
 		p.Description = "Service Request Details"
 	}
 
-	var user *domain.User
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		user, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if user == nil {
-			uid, parseErr := uuid.Parse(claims.SupabaseUID)
-			if parseErr == nil {
-				user, _ = h.userRepo.GetByID(r.Context(), uid)
-			}
-		}
-	}
-	if user == nil && p.UserID != nil && *p.UserID != "" {
-		uid, err := uuid.Parse(*p.UserID)
-		if err == nil {
-			user, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
-	}
-	if user == nil {
-		env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-		appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-		if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-			users, err := h.userRepo.ListUsers(r.Context())
-			if err == nil && len(users) > 0 {
-				user = users[0]
-			}
-		}
-	}
-	if user == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	user, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
 		return
+	}
+	// Requests are created for the verified caller. Only an admin may create one
+	// on behalf of another user.
+	if p.UserID != nil && *p.UserID != "" && *p.UserID != user.ID.String() {
+		if !user.IsAdmin() {
+			response.Error(w, http.StatusForbidden, "You can only create requests for your own account", nil)
+			return
+		}
+		if uid, perr := uuid.Parse(*p.UserID); perr == nil {
+			if target, _ := h.userRepo.GetByID(r.Context(), uid); target != nil {
+				user = target
+			}
+		}
 	}
 
 	oppType := domain.OpportunityType(p.Type)
@@ -318,15 +303,8 @@ func (h *OpportunityHandler) FindMatches(w http.ResponseWriter, r *http.Request)
 }
 
 func (h *OpportunityHandler) CreateChainChild(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if !ok {
-		response.Error(w, http.StatusUnauthorized, "Unauthorized", nil)
-		return
-	}
-
-	user, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-	if err != nil || user == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	user, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
 		return
 	}
 
@@ -408,28 +386,32 @@ func (h *OpportunityHandler) UpdateStatus(w http.ResponseWriter, r *http.Request
 		p.Status = "ACCEPTED"
 	}
 
-	var providerID uuid.UUID
-	if p.UserID != nil && *p.UserID != "" {
-		uid, err := uuid.Parse(*p.UserID)
-		if err == nil {
+	caller, cerr := authz.CurrentUser(r)
+	if authz.Write(w, cerr) {
+		return
+	}
+	// The acting provider is the verified caller. user_id/phone in the body are
+	// honoured for admins only.
+	providerID := caller.ID
+	if caller.IsAdmin() && p.UserID != nil && *p.UserID != "" {
+		if uid, perr := uuid.Parse(*p.UserID); perr == nil {
 			providerID = uid
-		} else {
-			u, _ := h.userRepo.GetByPhone(r.Context(), *p.UserID)
-			if u != nil {
-				providerID = u.ID
-			}
 		}
 	}
-	if providerID == uuid.Nil && p.Phone != nil && *p.Phone != "" {
-		u, _ := h.userRepo.GetByPhone(r.Context(), *p.Phone)
-		if u != nil {
-			providerID = u.ID
+	// Accepting an open request is open to any provider; every other status
+	// change requires being a participant of the order (or an admin).
+	if !caller.IsAdmin() && domain.OpportunityStatus(p.Status) != domain.StatusAccepted {
+		existing, gerr := h.oppService.GetOpportunity(r.Context(), id)
+		if gerr != nil || existing == nil {
+			response.Error(w, http.StatusNotFound, "Opportunity not found", nil)
+			return
 		}
-	}
-	if providerID == uuid.Nil {
-		u := h.getUserFromRequest(r)
-		if u != nil {
-			providerID = u.ID
+		isParticipant := existing.UserID == caller.ID ||
+			(existing.AssignedUserID != nil && *existing.AssignedUserID == caller.ID) ||
+			(existing.TargetVendorID != nil && *existing.TargetVendorID == caller.ID)
+		if !isParticipant {
+			response.Error(w, http.StatusForbidden, "You are not a participant of this order", nil)
+			return
 		}
 	}
 
@@ -477,66 +459,21 @@ func (h *OpportunityHandler) GetStatusHistory(w http.ResponseWriter, r *http.Req
 	response.JSON(w, http.StatusOK, "Opportunity status history retrieved successfully", history)
 }
 
+// getUserFromRequest returns the verified caller (nil if unauthenticated). An
+// admin may view another user's data by passing user_id; nobody else can.
 func (h *OpportunityHandler) getUserFromRequest(r *http.Request) *domain.User {
-	// 1. Direct Authorization Header inspection (even if route is not wrapped by auth middleware)
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if tokenStr != "" {
-			if uid, err := uuid.Parse(tokenStr); err == nil {
-				if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-					return u
-				}
-			}
-			if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil {
-				return u
-			}
-			if u, _ := h.userRepo.GetByPhone(r.Context(), tokenStr); u != nil {
-				return u
+	caller, err := authz.CurrentUser(r)
+	if err != nil {
+		return nil
+	}
+	if param := r.URL.Query().Get("user_id"); param != "" && param != caller.ID.String() && caller.IsAdmin() {
+		if uid, perr := uuid.Parse(param); perr == nil {
+			if target, _ := h.userRepo.GetByID(r.Context(), uid); target != nil {
+				return target
 			}
 		}
 	}
-
-	// 2. JWT claims from context
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if u != nil {
-			return u
-		}
-		if uid, err := uuid.Parse(claims.SupabaseUID); err == nil {
-			if uByID, _ := h.userRepo.GetByID(r.Context(), uid); uByID != nil {
-				return uByID
-			}
-		}
-		if uByPhone, _ := h.userRepo.GetByPhone(r.Context(), claims.SupabaseUID); uByPhone != nil {
-			return uByPhone
-		}
-	}
-
-	// 3. Query parameters (user_id or phone)
-	userParam := r.URL.Query().Get("user_id")
-	if userParam == "" {
-		userParam = r.URL.Query().Get("phone")
-	}
-	if userParam != "" {
-		uid, err := uuid.Parse(userParam)
-		if err == nil {
-			u, _ := h.userRepo.GetByID(r.Context(), uid)
-			if u != nil {
-				return u
-			}
-		}
-		u, _ := h.userRepo.GetByPhone(r.Context(), userParam)
-		if u != nil {
-			return u
-		}
-	}
-	return nil
+	return caller
 }
 
 func (h *OpportunityHandler) ListMatchingRequests(w http.ResponseWriter, r *http.Request) {
@@ -687,12 +624,15 @@ func (h *OpportunityHandler) ConfirmResources(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	callerIdent := req.ProviderID
-	if callerIdent == "" {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok {
-			callerIdent = claims.SupabaseUID
-		}
+	caller, cerr := authz.CurrentUser(r)
+	if authz.Write(w, cerr) {
+		return
+	}
+	// The acting provider is always the verified caller; only an admin may
+	// confirm resources on behalf of a named provider.
+	callerIdent := caller.ID.String()
+	if req.ProviderID != "" && caller.IsAdmin() {
+		callerIdent = req.ProviderID
 	}
 
 	updated, err := h.oppService.ConfirmResources(r.Context(), service.ConfirmResourcesParams{
@@ -720,46 +660,25 @@ func (h *OpportunityHandler) ConfirmResources(w http.ResponseWriter, r *http.Req
 // JOURNEY HANDLER METHODS (Phase A)
 // -----------------------------------------------------------------------------
 
+// resolveRequestUser returns the verified caller. A different user may be named
+// only by an admin; everyone else is limited to their own account.
 func (h *OpportunityHandler) resolveRequestUser(r *http.Request, explicitID string) (*domain.User, error) {
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil {
-			return u, nil
-		}
-		if parsedUID, err := uuid.Parse(claims.SupabaseUID); err == nil {
-			u, err := h.userRepo.GetByID(r.Context(), parsedUID)
-			if err == nil && u != nil {
-				return u, nil
-			}
+	caller, err := authz.CurrentUser(r)
+	if err != nil {
+		return nil, fmt.Errorf("user not found or unauthenticated")
+	}
+	if explicitID == "" || explicitID == caller.ID.String() {
+		return caller, nil
+	}
+	if !caller.IsAdmin() {
+		return nil, fmt.Errorf("you can only act for your own account")
+	}
+	if uid, perr := uuid.Parse(explicitID); perr == nil {
+		if target, _ := h.userRepo.GetByID(r.Context(), uid); target != nil {
+			return target, nil
 		}
 	}
-
-	if explicitID != "" {
-		if parsedUID, err := uuid.Parse(explicitID); err == nil {
-			u, err := h.userRepo.GetByID(r.Context(), parsedUID)
-			if err == nil && u != nil {
-				return u, nil
-			}
-		}
-		// Try resolving by phone number
-		u, err := h.userRepo.GetByPhone(r.Context(), explicitID)
-		if err == nil && u != nil {
-			return u, nil
-		}
-	}
-
-	// Local development fallback only when NOT running in production
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-		users, err := h.userRepo.ListUsers(r.Context())
-		if err == nil && len(users) > 0 {
-			return users[0], nil
-		}
-	}
-
-	return nil, fmt.Errorf("user not found or unauthenticated")
+	return nil, fmt.Errorf("user not found")
 }
 
 // RegisterJourney handles POST /api/v1/journeys

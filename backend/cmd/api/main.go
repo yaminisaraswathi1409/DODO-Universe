@@ -7,17 +7,20 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/go-chi/chi/v5"
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
+	"github.com/uop/backend/internal/auth"
 	"github.com/uop/backend/internal/config"
 	"github.com/uop/backend/internal/handler"
 	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/plugin"
 	"github.com/uop/backend/internal/repository/postgres"
+	"github.com/uop/backend/internal/runtimeenv"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
 )
@@ -96,6 +99,54 @@ func main() {
 		checkoutService = service.NewCheckoutService(checkoutRepo, userRepo)
 	}
 
+	// ---- Authentication wiring: signed tokens, OTP, SMS gateway, private files ----
+	if problems := cfg.Validate(); len(problems) > 0 {
+		for _, p := range problems {
+			log.Printf("[config] %v", p)
+		}
+		log.Fatalf("Refusing to start: fix the configuration problems above (see backend/.env.example)")
+	}
+	tokenService, tokErr := auth.NewTokenService(auth.TokenConfig{
+		Secret:     cfg.AuthJWTSecret,
+		Issuer:     cfg.AuthIssuer,
+		Audience:   cfg.AuthAudience,
+		AccessTTL:  cfg.AccessTokenTTL,
+		RefreshTTL: cfg.RefreshTokenTTL,
+	})
+	if tokErr != nil {
+		log.Fatalf("token service: %v", tokErr)
+	}
+	otpHasher, otpErr := auth.NewOTPHasher(cfg.OTPHMACSecret)
+	if otpErr != nil {
+		log.Fatalf("otp hasher: %v", otpErr)
+	}
+	fileSigner, signErr := auth.NewFileSigner(cfg.FileSigningSecret, nil)
+	if signErr != nil {
+		log.Fatalf("file signer: %v", signErr)
+	}
+	smsSender := auth.NewSMSSender(auth.SMSSettings{
+		Provider:           cfg.SMSProvider,
+		TwilioAccountSID:   cfg.TwilioAccountSID,
+		TwilioAuthToken:    cfg.TwilioAuthToken,
+		TwilioFromNumber:   cfg.TwilioFromNumber,
+		TwilioMessagingSID: cfg.TwilioMessagingSID,
+		IsDevelopmentEnv:   runtimeenv.IsDevelopment(),
+	})
+	log.Printf("[auth] SMS provider: %s", smsSender.Name())
+	if unconfigured, isNone := smsSender.(auth.UnconfiguredSMS); isNone {
+		log.Printf("[auth] WARNING: no SMS gateway configured (%s). OTP requests will fail with HTTP 503 until SMS_PROVIDER is configured.", unconfigured.Reason)
+	}
+	if userService != nil {
+		userService.SetOTPFlow(service.NewOTPFlow(service.OTPFlowConfig{
+			Store:         userRepo,
+			Hasher:        otpHasher,
+			Sender:        smsSender,
+			Tokens:        tokenService,
+			TTL:           cfg.OTPTTL,
+			IsDevelopment: runtimeenv.IsDevelopment(),
+		}))
+	}
+
 	// Phase 6: Persistent Notification Dispatcher Initialization & Background Worker
 	var notificationDispatcher *service.NotificationDispatcher
 	if userRepo != nil {
@@ -149,7 +200,21 @@ func main() {
 	if checkoutService != nil && userRepo != nil {
 		checkoutHandler = handler.NewCheckoutHandler(checkoutService, userRepo)
 	}
-	uploadHandler := handler.NewUploadHandler("./public/uploads")
+	uploadHandler := handler.NewUploadHandler("./public/uploads", cfg.PrivateUploadDir, fileSigner)
+	if logisticsHandler != nil && userRepo != nil {
+		// Explicit driver identity is enforced only once driver_profiles exists and is populated.
+		logisticsHandler.SetDriverPolicy(userRepo, strings.EqualFold(os.Getenv("DRIVER_PROFILE_ENFORCEMENT"), "enforce"))
+	}
+
+	authn := &middleware.Authenticator{
+		Tokens:            tokenService,
+		SupabaseJWTSecret: cfg.SupabaseJWTSecret,
+		IsPublic:          middleware.IsPublicRoute,
+		IsAdminOnly:       middleware.IsAdminOnlyRoute,
+	}
+	if userRepo != nil {
+		authn.Users = userRepo
+	}
 
 	// Setup Chi Router
 	r := chi.NewRouter()
@@ -162,20 +227,55 @@ func main() {
 	r.Use(chimiddleware.Timeout(30 * time.Second))
 
 	// CORS Configuration
-	r.Use(cors.Handler(cors.Options{
-		AllowedOrigins:   []string{"*"},
+	corsOpts := cors.Options{
 		AllowedMethods:   []string{"GET", "POST", "PUT", "DELETE", "OPTIONS"},
-		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token"},
-		ExposedHeaders:   []string{"Link"},
+		AllowedHeaders:   []string{"Accept", "Authorization", "Content-Type", "X-CSRF-Token", "Retry-After"},
+		ExposedHeaders:   []string{"Link", "Retry-After"},
 		AllowCredentials: true,
 		MaxAge:           300,
-	}))
+	}
+
+	if runtimeenv.IsProduction() {
+		corsOpts.AllowedOrigins = splitOrigins(cfg.CORSAllowedOrigins)
+	} else {
+		// In development, dynamically permit any localhost / 127.0.0.1 port (Flutter web on random ports,
+		// Next.js on 3000, etc.) in addition to explicitly configured origins.
+		allowedMap := make(map[string]struct{})
+		for _, o := range splitOrigins(cfg.CORSAllowedOrigins) {
+			allowedMap[strings.ToLower(strings.TrimSpace(o))] = struct{}{}
+		}
+		corsOpts.AllowOriginFunc = func(r *http.Request, origin string) bool {
+			lower := strings.ToLower(strings.TrimSpace(origin))
+			if lower == "" {
+				return true
+			}
+			if _, ok := allowedMap[lower]; ok {
+				return true
+			}
+			// Allow all localhost and 127.0.0.1 origins on any port for local dev
+			if strings.HasPrefix(lower, "http://localhost:") ||
+				strings.HasPrefix(lower, "http://127.0.0.1:") ||
+				strings.HasPrefix(lower, "https://localhost:") ||
+				strings.HasPrefix(lower, "https://127.0.0.1:") ||
+				lower == "http://localhost" ||
+				lower == "http://127.0.0.1" {
+				return true
+			}
+			return false
+		}
+	}
+	r.Use(cors.Handler(corsOpts))
 
 	// Serve Uploaded Files (Images, PDFs, Videos)
-	r.Handle("/uploads/*", http.StripPrefix("/uploads/", http.FileServer(http.Dir("./public/uploads"))))
+	r.Handle("/uploads/*", http.StripPrefix("/uploads/", handler.PublicFilesHandler("./public/uploads")))
 
 	// API Routes
 	r.Route("/api/v1", func(r chi.Router) {
+		// Deny-by-default authentication: every route except the short public
+		// allow-list in internal/middleware/public_routes.go needs a verified
+		// access token. X-User-ID and raw Authorization values are never trusted.
+		r.Use(authn.Middleware)
+
 		// Health check
 		r.Get("/health", func(w http.ResponseWriter, r *http.Request) {
 			response.JSON(w, http.StatusOK, "UOP Core Backend API is healthy", map[string]interface{}{
@@ -185,8 +285,20 @@ func main() {
 			})
 		})
 
-		// File Upload endpoint
+		// File Upload endpoint (authenticated; KYC/documents are stored privately)
 		r.Post("/upload", uploadHandler.HandleFileUpload)
+		r.Get("/files/private/{owner}/{name}", uploadHandler.ServePrivateFile)
+		r.Post("/files/private/{owner}/{name}/signed-url", uploadHandler.SignPrivateFile)
+		r.Get("/files/signed/{token}", uploadHandler.ServeSignedFile)
+
+		// Token refresh (public: the refresh token is the credential)
+		r.Post("/auth/refresh", func(w http.ResponseWriter, r *http.Request) {
+			if userMgmtHandler == nil {
+				response.Error(w, http.StatusServiceUnavailable, "Database not connected", nil)
+				return
+			}
+			userMgmtHandler.RefreshToken(w, r)
+		})
 
 		// Phase 3: Reusable Dynamic Forms Engine endpoints
 		r.Post("/admin/forms/schemas", func(w http.ResponseWriter, r *http.Request) {
@@ -1032,7 +1144,7 @@ func main() {
 
 		// Authenticated Routes (Protected by Supabase JWT validation middleware)
 		r.Group(func(r chi.Router) {
-			r.Use(middleware.JWTAuthMiddleware(cfg.SupabaseJWTSecret))
+			// Authentication is enforced by authn.Middleware at the /api/v1 level.
 
 			// User Sync & Self Inspection
 			r.Post("/users/sync", func(w http.ResponseWriter, r *http.Request) {
@@ -1179,4 +1291,15 @@ func main() {
 	}
 
 	log.Println("Server exited cleanly.")
+}
+
+// splitOrigins parses the comma separated CORS_ALLOWED_ORIGINS value.
+func splitOrigins(raw string) []string {
+	var origins []string
+	for _, o := range strings.Split(raw, ",") {
+		if o = strings.TrimSpace(o); o != "" {
+			origins = append(origins, o)
+		}
+	}
+	return origins
 }

@@ -6,6 +6,7 @@ import (
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -13,12 +14,22 @@ import (
 
 type LogisticsHandler struct {
 	logisticsService *service.LogisticsService
+
+	// access answers "who may act on this order"; drivers/enforceDriverProfile
+	// implement the explicit driver identity policy (see logistics_authz.go).
+	access               OrderAccessSource
+	drivers              authz.DriverLookup
+	enforceDriverProfile bool
 }
 
 func NewLogisticsHandler(logisticsService *service.LogisticsService) *LogisticsHandler {
-	return &LogisticsHandler{
+	h := &LogisticsHandler{
 		logisticsService: logisticsService,
 	}
+	if logisticsService != nil {
+		h.access = logisticsService
+	}
+	return h
 }
 
 // 1. Calculate Delivery & Itemized Invoice Breakdown (POST /api/v1/logistics/calculate-delivery)
@@ -26,6 +37,10 @@ func (h *LogisticsHandler) CalculateDelivery(w http.ResponseWriter, r *http.Requ
 	var req domain.DeliveryCalculationRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	if _, ok := h.requireAuthenticated(w, r); !ok {
 		return
 	}
 
@@ -43,6 +58,10 @@ func (h *LogisticsHandler) ParseVoice(w http.ResponseWriter, r *http.Request) {
 	var req domain.VoiceParseRequest
 	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid voice request body", err.Error())
+		return
+	}
+
+	if _, ok := h.requireAuthenticated(w, r); !ok {
 		return
 	}
 
@@ -79,10 +98,12 @@ func (h *LogisticsHandler) TriggerCascade(w http.ResponseWriter, r *http.Request
 		return
 	}
 
-	userID, err := uuid.Parse(p.ParentUserID)
-	if err != nil {
-		userID = uuid.New()
+	// The acting user is the verified caller; parent_user_id in the body is ignored.
+	caller, ok := h.requireOrderRole(w, r, rootID, service.RoleOrderOwner, service.RoleOrderProvider)
+	if !ok {
+		return
 	}
+	userID := caller.ID
 
 	var created *domain.Opportunity
 	switch p.CascadeType {
@@ -129,10 +150,12 @@ func (h *LogisticsHandler) ReportSOSIncident(w http.ResponseWriter, r *http.Requ
 		return
 	}
 
-	reporterID, err := uuid.Parse(p.ReporterID)
-	if err != nil {
-		reporterID = uuid.New()
+	// The reporter is the verified caller (driver or provider on the order).
+	caller, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderProvider, service.RoleOrderDriver)
+	if !ok {
+		return
 	}
+	reporterID := caller.ID
 
 	inc, repairChild, err := h.logisticsService.RegisterSOSIncident(r.Context(), oppID, reporterID, p.Description, p.Lat, p.Lng)
 	if err != nil {
@@ -163,6 +186,10 @@ func (h *LogisticsHandler) GenerateWayManifest(w http.ResponseWriter, r *http.Re
 	oppID, err := uuid.Parse(p.OpportunityID)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid opportunity_id", err.Error())
+		return
+	}
+
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderProvider); !ok {
 		return
 	}
 
@@ -205,6 +232,10 @@ func (h *LogisticsHandler) UploadPOL(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
+		return
+	}
+
 	manifest, err := h.logisticsService.UpdatePOL(r.Context(), oppID, p.POLPhotoURL)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to upload Proof of Loading", err.Error())
@@ -233,6 +264,10 @@ func (h *LogisticsHandler) UploadPOD(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
+		return
+	}
+
 	manifest, err := h.logisticsService.UpdatePOD(r.Context(), oppID, p.PODQRCode, p.PODSignature)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to upload Proof of Delivery", err.Error())
@@ -256,6 +291,10 @@ func (h *LogisticsHandler) VerifyDeliveryOTP(w http.ResponseWriter, r *http.Requ
 	}
 	if err := json.NewDecoder(r.Body).Decode(&payload); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
+		return
+	}
+
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderOwner, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
 		return
 	}
 
@@ -296,8 +335,13 @@ func (h *LogisticsHandler) CheckoutPart(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// The buyer is the verified caller; buyer_id in the body is ignored.
+	caller, ok := h.requireAuthenticated(w, r)
+	if !ok {
+		return
+	}
 	partID, _ := uuid.Parse(p.PartID)
-	buyerID, _ := uuid.Parse(p.BuyerID)
+	buyerID := caller.ID
 	rootID, _ := uuid.Parse(p.RootID)
 	if partID == uuid.Nil {
 		partID = uuid.New()
@@ -338,6 +382,10 @@ func (h *LogisticsHandler) CreateVehicleDriverPairing(w http.ResponseWriter, r *
 		return
 	}
 
+	if !h.authorizeVehicleAction(w, r, vehicleID) || !h.checkDriverAssignable(w, r, driverID) {
+		return
+	}
+
 	pairing, err := h.logisticsService.CreateVehicleDriverPairing(r.Context(), vehicleID, driverID, p.LicenseNumber, p.LicenseClass)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to create vehicle driver pairing", err.Error())
@@ -356,6 +404,11 @@ func (h *LogisticsHandler) SettleEscrow(w http.ResponseWriter, r *http.Request) 
 		return
 	}
 
+	// Only the customer who owns the order (or an admin) may trigger settlement.
+	if _, ok := h.requireOrderRole(w, r, rootID, service.RoleOrderOwner); !ok {
+		return
+	}
+
 	if err := h.logisticsService.SettleTree(r.Context(), rootID); err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to settle escrow tree", err.Error())
 		return
@@ -370,6 +423,10 @@ func (h *LogisticsHandler) GetTree(w http.ResponseWriter, r *http.Request) {
 	oppID, err := uuid.Parse(oppIDStr)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid opportunity id", err.Error())
+		return
+	}
+
+	if _, ok := h.requireOrderRole(w, r, oppID, service.RoleOrderOwner, service.RoleOrderProvider, service.RoleOrderDriver); !ok {
 		return
 	}
 

@@ -2,10 +2,8 @@ package service
 
 import (
 	"context"
-	"crypto/rand"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
 	"time"
 
@@ -16,24 +14,17 @@ import (
 
 type UserService struct {
 	userRepo *postgres.UserRepository
+	otp      *OTPFlow
 }
+
+// SetOTPFlow installs the OTP/SMS/token flow. Authentication endpoints refuse to work without it.
+func (s *UserService) SetOTPFlow(flow *OTPFlow) { s.otp = flow }
+
+// OTP returns the configured OTP flow (nil if authentication is not configured).
+func (s *UserService) OTP() *OTPFlow { return s.otp }
 
 func NewUserService(userRepo *postgres.UserRepository) *UserService {
 	return &UserService{userRepo: userRepo}
-}
-
-// GenerateRandomOTP generates a secure 6-digit numerical OTP code
-func GenerateRandomOTP() string {
-	var table = [...]byte{'1', '2', '3', '4', '5', '6', '7', '8', '9', '0'}
-	b := make([]byte, 6)
-	n, err := io.ReadAtLeast(rand.Reader, b, 6)
-	if n != 6 || err != nil {
-		return "123456" // fallback default for dev
-	}
-	for i := 0; i < len(b); i++ {
-		b[i] = table[int(b[i])%len(table)]
-	}
-	return string(b)
 }
 
 type OnboardingStatusResponse struct {
@@ -45,82 +36,6 @@ type OnboardingStatusResponse struct {
 	IsActive       bool              `json:"is_active"`
 }
 
-func (s *UserService) InviteUser(ctx context.Context, adminUser *domain.User, fullName, phone, email string, role domain.UserRole) (*domain.User, error) {
-	var inviterID uuid.UUID
-	if adminUser != nil {
-		inviterID = adminUser.ID
-	}
-
-	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
-	if err != nil {
-		return nil, err
-	}
-	phone = normPhone
-
-	otpCode := GenerateRandomOTP()
-	expiresAt := time.Now().Add(15 * time.Minute)
-
-	if role == "" {
-		role = domain.RoleUser
-	}
-
-	invited, err := s.userRepo.InviteUser(ctx, inviterID, fullName, phone, email, role, otpCode, expiresAt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to invite user: %w", err)
-	}
-
-	log.Printf("[COMMUNICATION GATEWAY] Sent Invitation & OTP code [%s] via SMS/WhatsApp to %s (%s)\n", otpCode, phone, fullName)
-
-	return invited, nil
-}
-
-func (s *UserService) SignupUser(ctx context.Context, fullName, phone, email string) (*domain.User, error) {
-	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
-	if err != nil {
-		return nil, err
-	}
-	phone = normPhone
-
-	user, err := s.userRepo.SignupUser(ctx, fullName, phone, email)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create pending user record: %w", err)
-	}
-
-	otpCode := GenerateRandomOTP()
-	expiresAt := time.Now().Add(15 * time.Minute)
-
-	updatedUser, err := s.userRepo.CreateOTPRecord(ctx, phone, otpCode, expiresAt)
-	if err != nil {
-		log.Printf("[USER SERVICE WARN] Failed to create OTP record: %v\n", err)
-		return user, nil
-	}
-
-	log.Printf("[DEVELOPMENT OTP] Signup OTP code [%s] generated for mobile: %s (%s)\n", otpCode, phone, fullName)
-	return updatedUser, nil
-}
-
-func (s *UserService) VerifyOTP(ctx context.Context, phone, otpCode string) (*domain.User, error) {
-	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
-	if err != nil {
-		return nil, err
-	}
-	phone = normPhone
-
-	if otpCode == "" {
-		return nil, fmt.Errorf("OTP code is required")
-	}
-
-	user, err := s.userRepo.VerifyOTPRecord(ctx, phone, otpCode, true)
-	if err != nil {
-		return nil, err
-	}
-	if user == nil {
-		return nil, fmt.Errorf("invalid or expired OTP code")
-	}
-
-	log.Printf("[USER SERVICE] Mobile number verified successfully for user ID: %s (Phone: %s)\n", user.ID, phone)
-	return user, nil
-}
 
 func (s *UserService) CompleteProfile(ctx context.Context, userID uuid.UUID, avatarURL, bio, addressText, aadhaarNumber string, lat, lng float64) (*domain.User, error) {
 	if avatarURL == "" {
@@ -298,25 +213,6 @@ func (s *UserService) GetOnboardingStatus(ctx context.Context, userID uuid.UUID)
 
 func (s *UserService) ListUsers(ctx context.Context) ([]*domain.User, error) {
 	return s.userRepo.ListUsers(ctx)
-}
-
-func (s *UserService) RequestOTP(ctx context.Context, phone string) (*domain.User, error) {
-	normPhone, err := postgres.ValidateAndNormalizePhone(phone)
-	if err != nil {
-		return nil, err
-	}
-	phone = normPhone
-
-	otpCode := GenerateRandomOTP()
-	expiresAt := time.Now().Add(15 * time.Minute)
-
-	user, err := s.userRepo.CreateOTPRecord(ctx, phone, otpCode, expiresAt)
-	if err != nil {
-		return nil, fmt.Errorf("failed to request OTP: %w", err)
-	}
-
-	log.Printf("[COMMUNICATION GATEWAY] Sent login OTP code [%s] via SMS to mobile: %s\n", otpCode, phone)
-	return user, nil
 }
 
 // User Saved Addresses Service Methods

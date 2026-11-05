@@ -5,12 +5,11 @@ import (
 	"fmt"
 	"net/http"
 	"strconv"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -31,36 +30,13 @@ func NewOperationsHandler(
 	}
 }
 
+// getUserFromRequest returns the verified caller, or nil when unauthenticated.
 func (h *OperationsHandler) getUserFromRequest(r *http.Request) *domain.User {
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if tokenStr != "" {
-			if uid, err := uuid.Parse(tokenStr); err == nil {
-				if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-					return u
-				}
-			}
-			if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil {
-				return u
-			}
-			if u, _ := h.userRepo.GetByPhone(r.Context(), tokenStr); u != nil {
-				return u
-			}
-		}
+	user, err := authz.CurrentUser(r)
+	if err != nil {
+		return nil
 	}
-
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID); u != nil {
-			return u
-		}
-	}
-	return nil
+	return user
 }
 
 // ----------------------------------------------------------------------------

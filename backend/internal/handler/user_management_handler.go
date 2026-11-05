@@ -3,15 +3,17 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"net"
 	"net/http"
-	"os"
-	"strings"
+	"strconv"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/auth"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
 	"github.com/uop/backend/internal/service"
 	"github.com/uop/backend/pkg/response"
@@ -51,6 +53,9 @@ type RequestOTPPayload struct {
 	Phone string `json:"phone"`
 }
 
+// CompleteProfilePayload / VerifyFacePayload still carry user_id/phone for
+// older clients, but they are IGNORED for identity: the target is always the
+// authenticated caller. A different user_id is rejected.
 type CompleteProfilePayload struct {
 	UserID        string  `json:"user_id"`
 	Phone         string  `json:"phone"`
@@ -68,37 +73,62 @@ type VerifyFacePayload struct {
 	FaceVerificationRef string `json:"face_verification_ref"`
 }
 
-// CompleteProfile updates profile details, photo, and Aadhaar number
+// clientIP returns the peer address used for IP based rate limiting.
+func clientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
+// requireSelf resolves the authenticated caller and rejects an explicitly
+// supplied user_id that refers to somebody else.
+func requireSelf(w http.ResponseWriter, r *http.Request, claimedUserID string) (*domain.User, bool) {
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
+		return nil, false
+	}
+	if claimedUserID != "" {
+		if id, perr := uuid.Parse(claimedUserID); perr != nil || id != caller.ID {
+			response.Error(w, http.StatusForbidden, "You can only perform this action for your own account", nil)
+			return nil, false
+		}
+	}
+	return caller, true
+}
+
+// writeOTPError maps OTP/auth flow errors to HTTP responses.
+func writeOTPError(w http.ResponseWriter, message string, err error) {
+	var limited *service.OTPRateLimitError
+	switch {
+	case errors.As(err, &limited):
+		w.Header().Set("Retry-After", strconv.Itoa(int(limited.RetryAfter.Seconds())+1))
+		response.Error(w, http.StatusTooManyRequests, message, limited.Error())
+	case errors.Is(err, postgres.ErrOTPLocked):
+		response.Error(w, http.StatusTooManyRequests, message, err.Error())
+	case errors.Is(err, postgres.ErrInvalidOTP):
+		response.Error(w, http.StatusBadRequest, message, err.Error())
+	case errors.Is(err, service.ErrOTPUnavailable):
+		response.Error(w, http.StatusServiceUnavailable, message, "SMS delivery is currently unavailable")
+	default:
+		response.Error(w, http.StatusBadRequest, message, err.Error())
+	}
+}
+
+// CompleteProfile updates the caller's profile details, photo and Aadhaar number.
 func (h *UserManagementHandler) CompleteProfile(w http.ResponseWriter, r *http.Request) {
 	var p CompleteProfilePayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
-	var targetUser *domain.User
-	if p.UserID != "" {
-		uid, parseErr := uuid.Parse(p.UserID)
-		if parseErr == nil {
-			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
-	}
-	if targetUser == nil && p.Phone != "" {
-		targetUser, _ = h.userRepo.GetByPhone(r.Context(), p.Phone)
-	}
-	if targetUser == nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		}
-	}
-
-	if targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	caller, ok := requireSelf(w, r, p.UserID)
+	if !ok {
 		return
 	}
 
-	updated, err := h.userService.CompleteProfile(r.Context(), targetUser.ID, p.AvatarURL, p.Bio, p.AddressText, p.AadhaarNumber, p.Lat, p.Lng)
+	updated, err := h.userService.CompleteProfile(r.Context(), caller.ID, p.AvatarURL, p.Bio, p.AddressText, p.AadhaarNumber, p.Lat, p.Lng)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Failed to complete profile", err.Error())
 		return
@@ -107,37 +137,19 @@ func (h *UserManagementHandler) CompleteProfile(w http.ResponseWriter, r *http.R
 	response.JSON(w, http.StatusOK, "Profile details completed successfully", updated)
 }
 
-// VerifyFace processes Face ID verification snapshot
+// VerifyFace processes the caller's Face ID verification snapshot.
 func (h *UserManagementHandler) VerifyFace(w http.ResponseWriter, r *http.Request) {
 	var p VerifyFacePayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
-	var targetUser *domain.User
-	if p.UserID != "" {
-		uid, parseErr := uuid.Parse(p.UserID)
-		if parseErr == nil {
-			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
-	}
-	if targetUser == nil && p.Phone != "" {
-		targetUser, _ = h.userRepo.GetByPhone(r.Context(), p.Phone)
-	}
-	if targetUser == nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		}
-	}
-
-	if targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	caller, ok := requireSelf(w, r, p.UserID)
+	if !ok {
 		return
 	}
 
-	updated, err := h.userService.VerifyFace(r.Context(), targetUser.ID, p.FaceVerificationRef)
+	updated, err := h.userService.VerifyFace(r.Context(), caller.ID, p.FaceVerificationRef)
 	if err != nil {
 		response.Error(w, http.StatusBadRequest, "Face verification failed", err.Error())
 		return
@@ -151,13 +163,12 @@ func (h *UserManagementHandler) VerifyFace(w http.ResponseWriter, r *http.Reques
 	response.JSON(w, http.StatusOK, msg, updated)
 }
 
-// Invite creates/invites a new pending user
+// Invite creates/invites a new pending user. Admins may invite USER accounts;
+// only a SUPER_ADMIN may mint ADMIN or SUPER_ADMIN accounts.
 func (h *UserManagementHandler) Invite(w http.ResponseWriter, r *http.Request) {
-	var adminUser *domain.User
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok {
-		u, _ := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		adminUser = u
+	admin, err := authz.RequireAdmin(r)
+	if authz.Write(w, err) {
+		return
 	}
 
 	var p InviteUserPayload
@@ -167,47 +178,112 @@ func (h *UserManagementHandler) Invite(w http.ResponseWriter, r *http.Request) {
 	}
 
 	role := domain.UserRole(p.Role)
-	invited, err := h.userService.InviteUser(r.Context(), adminUser, p.FullName, p.Phone, p.Email, role)
-	if err != nil {
-		response.Error(w, http.StatusBadRequest, "Failed to invite user", err.Error())
+	if role == "" {
+		role = domain.RoleUser
+	}
+	if !admin.CanGrantRole(role) {
+		response.Error(w, http.StatusForbidden, "Only a SUPER_ADMIN can grant administrative roles", nil)
 		return
 	}
+
+	flow := h.userService.OTP()
+	if flow == nil {
+		response.Error(w, http.StatusServiceUnavailable, "Authentication is not configured", nil)
+		return
+	}
+	invited, err := flow.Invite(r.Context(), admin, p.FullName, p.Phone, p.Email, role)
+	if err != nil {
+		writeOTPError(w, "Failed to invite user", err)
+		return
+	}
+	invited.OTPCode = ""
 
 	response.JSON(w, http.StatusCreated, "User invitation created and OTP dispatched successfully", invited)
 }
 
-// VerifyOTP verifies mobile number using OTP code
+// VerifyOTP verifies a mobile number using an OTP code and, on success, issues
+// the signed access and refresh tokens that every later request must carry.
 func (h *UserManagementHandler) VerifyOTP(w http.ResponseWriter, r *http.Request) {
 	var p VerifyOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
-	user, err := h.userService.VerifyOTP(r.Context(), p.Phone, p.OTPCode)
-	if err != nil {
-		response.Error(w, http.StatusBadRequest, "OTP verification failed", err.Error())
+	flow := h.userService.OTP()
+	if flow == nil {
+		response.Error(w, http.StatusServiceUnavailable, "Authentication is not configured", nil)
 		return
 	}
 
-	response.JSON(w, http.StatusOK, "Mobile number verified successfully via OTP", user)
+	result, err := flow.Verify(r.Context(), p.Phone, p.OTPCode, clientIP(r))
+	if err != nil {
+		writeOTPError(w, "OTP verification failed", err)
+		return
+	}
+	result.User.OTPCode = ""
+
+	response.JSON(w, http.StatusOK, "Mobile number verified successfully via OTP", sessionResponse(result.User, result.Tokens))
 }
 
-// GetOnboardingStatus retrieves current onboarding checklist status
+func sessionResponse(user *domain.User, tokens *auth.TokenPair) map[string]interface{} {
+	return map[string]interface{}{
+		"user":               user,
+		"id":                 user.ID.String(),
+		"user_id":            user.ID.String(),
+		"supabase_uid":       user.SupabaseUID,
+		"phone":              user.Phone,
+		"full_name":          user.FullName,
+		"email":              user.Email,
+		"role":               user.Role,
+		"status":             user.Status,
+		"mobile_verified":    user.MobileVerified,
+		"is_verified":        user.IsVerified,
+		"access_token":       tokens.AccessToken,
+		"refresh_token":      tokens.RefreshToken,
+		"token_type":         tokens.TokenType,
+		"expires_in":         tokens.ExpiresIn,
+		"refresh_expires_in": tokens.RefreshExpiresIn,
+	}
+}
+
+type RefreshPayload struct {
+	RefreshToken string `json:"refresh_token"`
+}
+
+// RefreshToken exchanges a valid refresh token for a new token pair.
+func (h *UserManagementHandler) RefreshToken(w http.ResponseWriter, r *http.Request) {
+	var p RefreshPayload
+	if err := json.NewDecoder(r.Body).Decode(&p); err != nil || p.RefreshToken == "" {
+		response.Error(w, http.StatusBadRequest, "refresh_token is required", nil)
+		return
+	}
+	flow := h.userService.OTP()
+	if flow == nil {
+		response.Error(w, http.StatusServiceUnavailable, "Authentication is not configured", nil)
+		return
+	}
+	result, err := flow.Refresh(r.Context(), p.RefreshToken)
+	switch {
+	case errors.Is(err, service.ErrAccountBlocked):
+		response.Error(w, http.StatusForbidden, "Account is suspended or deactivated", nil)
+		return
+	case err != nil:
+		response.Error(w, http.StatusUnauthorized, "Invalid or expired refresh token", nil)
+		return
+	}
+	result.User.OTPCode = ""
+
+	response.JSON(w, http.StatusOK, "Token refreshed", sessionResponse(result.User, result.Tokens))
+}
+
+// GetOnboardingStatus retrieves the caller's onboarding checklist status.
 func (h *UserManagementHandler) GetOnboardingStatus(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if !ok {
-		response.Error(w, http.StatusUnauthorized, "Unauthorized", nil)
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
 		return
 	}
 
-	user, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-	if err != nil || user == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
-		return
-	}
-
-	status, err := h.userService.GetOnboardingStatus(r.Context(), user.ID)
+	status, err := h.userService.GetOnboardingStatus(r.Context(), caller.ID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to fetch onboarding status", err.Error())
 		return
@@ -216,101 +292,120 @@ func (h *UserManagementHandler) GetOnboardingStatus(w http.ResponseWriter, r *ht
 	response.JSON(w, http.StatusOK, "Onboarding status retrieved", status)
 }
 
-// RequestOTP resends/generates an OTP code for a user mobile number
+// otpIssueResponse is the minimal public response for request-otp / signup.
+// It deliberately contains no user profile data and NEVER returns the OTP:
+// the endpoints are unauthenticated and must not reveal codes or registration state.
+// In development, the OTP is printed directly to the server terminal.
+func otpIssueResponse(_ *service.OTPIssueResult, ttlSeconds int) map[string]interface{} {
+	return map[string]interface{}{
+		"otp_sent":   true,
+		"expires_in": ttlSeconds,
+	}
+}
+
+// RequestOTP generates and sends an OTP code to a mobile number.
 func (h *UserManagementHandler) RequestOTP(w http.ResponseWriter, r *http.Request) {
 	var p RequestOTPPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
+	flow := h.userService.OTP()
+	if flow == nil {
+		response.Error(w, http.StatusServiceUnavailable, "Authentication is not configured", nil)
+		return
+	}
 
-	user, err := h.userService.RequestOTP(r.Context(), p.Phone)
+	res, err := flow.Request(r.Context(), p.Phone, clientIP(r))
 	if err != nil {
-		response.Error(w, http.StatusBadRequest, "Failed to request OTP code", err.Error())
+		writeOTPError(w, "Failed to request OTP code", err)
 		return
 	}
-
-	if user == nil {
-		response.Error(w, http.StatusInternalServerError, "User creation/update failed", nil)
-		return
-	}
-
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	isProd := env == "production" || env == "prod" || appEnv == "production" || appEnv == "prod"
-	resData := map[string]interface{}{
-		"user": user,
-	}
-	if !isProd {
-		resData["dev_otp_code"] = user.OTPCode
-	}
-	user.OTPCode = ""
-
-	response.JSON(w, http.StatusOK, "OTP code generated and dispatched via user_otps", resData)
+	response.JSON(w, http.StatusOK, "OTP code sent", otpIssueResponse(res, flow.TTLSeconds()))
 }
 
-// Signup handles new user signup registration and OTP dispatch
+// Signup handles new user registration and OTP dispatch.
 func (h *UserManagementHandler) Signup(w http.ResponseWriter, r *http.Request) {
 	var p SignupPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
 	if p.Phone == "" {
 		response.Error(w, http.StatusBadRequest, "Mobile phone number is required for signup", nil)
 		return
 	}
-
-	user, err := h.userService.SignupUser(r.Context(), p.FullName, p.Phone, p.Email)
-	if err != nil {
-		response.Error(w, http.StatusBadRequest, "Signup registration failed", err.Error())
+	flow := h.userService.OTP()
+	if flow == nil {
+		response.Error(w, http.StatusServiceUnavailable, "Authentication is not configured", nil)
 		return
 	}
 
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	isProd := env == "production" || env == "prod" || appEnv == "production" || appEnv == "prod"
-	resData := map[string]interface{}{
-		"user": user,
+	res, err := flow.Signup(r.Context(), p.FullName, p.Phone, p.Email, clientIP(r))
+	if err != nil {
+		writeOTPError(w, "Signup registration failed", err)
+		return
 	}
-	if !isProd {
-		resData["dev_otp_code"] = user.OTPCode
-	}
-	user.OTPCode = ""
-
-	response.JSON(w, http.StatusCreated, "User account created with PENDING status. OTP dispatched successfully", resData)
+	response.JSON(w, http.StatusCreated, "Account created with PENDING status. OTP sent", otpIssueResponse(res, flow.TTLSeconds()))
 }
 
-// ListUsers retrieves all users in system for management dashboard
+// ListUsers retrieves all users for the management dashboard (admin only).
 func (h *UserManagementHandler) ListUsers(w http.ResponseWriter, r *http.Request) {
+	if _, err := authz.RequireAdmin(r); authz.Write(w, err) {
+		return
+	}
 	users, err := h.userService.ListUsers(r.Context())
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to list users", err.Error())
 		return
+	}
+	for _, u := range users {
+		u.OTPCode = ""
 	}
 
 	response.JSON(w, http.StatusOK, "Users list retrieved", users)
 }
 
 type AddUserServicePayload struct {
-	UserID           string                 `json:"user_id"`
-	Phone            string                 `json:"phone"`
-	CategoryID       string                 `json:"category_id"`
-	AssetType        string                 `json:"asset_type"` // e.g. ELECTRICIAN, PLUMBER, CLEANING, TRACTOR, BRICKS
-	Title            string                 `json:"title"`
-	Description      string                 `json:"description"`
-	HourlyRate       *float64               `json:"hourly_rate"`
-	DailyRate        *float64               `json:"daily_rate"`
-	Lat              *float64               `json:"lat,omitempty"`
-	Lng              *float64               `json:"lng,omitempty"`
-	OfferType        string                 `json:"offer_type,omitempty"` // WITH_TRANSPORT or WITHOUT_TRANSPORT
-	UnitPrice        *float64               `json:"unit_price,omitempty"`
-	CoverageRadiusKM *float64               `json:"coverage_radius_km,omitempty"`
-	DistanceSlabs    []map[string]interface{}`json:"distance_slabs,omitempty"`
-	IncludedServices map[string]interface{} `json:"included_services,omitempty"`
-	Attributes       map[string]interface{} `json:"attributes,omitempty"`
-	AutoApprove      bool                   `json:"auto_approve,omitempty"`
+	UserID           string                   `json:"user_id"`
+	Phone            string                   `json:"phone"`
+	CategoryID       string                   `json:"category_id"`
+	AssetType        string                   `json:"asset_type"` // e.g. ELECTRICIAN, PLUMBER, CLEANING, TRACTOR, BRICKS
+	Title            string                   `json:"title"`
+	Description      string                   `json:"description"`
+	HourlyRate       *float64                 `json:"hourly_rate"`
+	DailyRate        *float64                 `json:"daily_rate"`
+	Lat              *float64                 `json:"lat,omitempty"`
+	Lng              *float64                 `json:"lng,omitempty"`
+	OfferType        string                   `json:"offer_type,omitempty"` // WITH_TRANSPORT or WITHOUT_TRANSPORT
+	UnitPrice        *float64                 `json:"unit_price,omitempty"`
+	CoverageRadiusKM *float64                 `json:"coverage_radius_km,omitempty"`
+	DistanceSlabs    []map[string]interface{} `json:"distance_slabs,omitempty"`
+	IncludedServices map[string]interface{}   `json:"included_services,omitempty"`
+	Attributes       map[string]interface{}   `json:"attributes,omitempty"`
+	AutoApprove      bool                     `json:"auto_approve,omitempty"`
+}
+
+// targetUserForWrite resolves the user a write applies to: the caller, or - for
+// admins only - the user named in user_id.
+func (h *UserManagementHandler) targetUserForWrite(w http.ResponseWriter, r *http.Request, claimedUserID string) (*domain.User, *domain.User, bool) {
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
+		return nil, nil, false
+	}
+	if claimedUserID == "" {
+		return caller, caller, true
+	}
+	target, rerr := h.resolveUser(r.Context(), claimedUserID)
+	if rerr != nil || target == nil {
+		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+		return nil, nil, false
+	}
+	if target.ID != caller.ID && !caller.IsAdmin() {
+		response.Error(w, http.StatusForbidden, "You can only perform this action for your own account", nil)
+		return nil, nil, false
+	}
+	return caller, target, true
 }
 
 func (h *UserManagementHandler) AddUserService(w http.ResponseWriter, r *http.Request) {
@@ -320,30 +415,13 @@ func (h *UserManagementHandler) AddUserService(w http.ResponseWriter, r *http.Re
 		return
 	}
 
-	var targetUser *domain.User
-	if p.UserID != "" {
-		uid, parseErr := uuid.Parse(p.UserID)
-		if parseErr == nil {
-			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
-		if targetUser == nil {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), p.UserID)
-		}
-	}
-	if targetUser == nil && p.Phone != "" {
-		targetUser, _ = h.userRepo.GetByPhone(r.Context(), p.Phone)
-	}
-	if targetUser == nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		}
-	}
-
-	if targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	caller, targetUser, ok := h.targetUserForWrite(w, r, p.UserID)
+	if !ok {
 		return
 	}
+	// Approval is an admin decision: a client-supplied auto_approve flag from a
+	// regular user is ignored.
+	autoApprove := p.AutoApprove && caller.IsAdmin()
 
 	if p.Title == "" {
 		p.Title = p.AssetType
@@ -392,16 +470,16 @@ func (h *UserManagementHandler) AddUserService(w http.ResponseWriter, r *http.Re
 
 	attrBytes, _ := json.Marshal(attrMap)
 
-	service, err := h.userService.AddUserSkillAssetWithAttributes(
+	svc, err := h.userService.AddUserSkillAssetWithAttributes(
 		r.Context(), targetUser.ID, catID, p.AssetType, p.Title, p.Description,
-		p.HourlyRate, p.DailyRate, latVal, lngVal, string(attrBytes), p.AutoApprove,
+		p.HourlyRate, p.DailyRate, latVal, lngVal, string(attrBytes), autoApprove,
 	)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to add service request", err.Error())
 		return
 	}
 
-	response.JSON(w, http.StatusCreated, "Service offer registered successfully", service)
+	response.JSON(w, http.StatusCreated, "Service offer registered successfully", svc)
 }
 
 type SubmitServiceDocumentsPayload struct {
@@ -424,28 +502,8 @@ func (h *UserManagementHandler) SubmitServiceDocuments(w http.ResponseWriter, r 
 		return
 	}
 
-	var targetUser *domain.User
-	if p.UserID != "" {
-		uid, parseErr := uuid.Parse(p.UserID)
-		if parseErr == nil {
-			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
-		if targetUser == nil {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), p.UserID)
-		}
-	}
-	if targetUser == nil && p.Phone != "" {
-		targetUser, _ = h.userRepo.GetByPhone(r.Context(), p.Phone)
-	}
-	if targetUser == nil {
-		claims, ok := middleware.GetUserClaims(r.Context())
-		if ok {
-			targetUser, _ = h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		}
-	}
-
-	if targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "User profile not found", nil)
+	_, targetUser, ok := h.targetUserForWrite(w, r, p.UserID)
+	if !ok {
 		return
 	}
 
@@ -454,6 +512,8 @@ func (h *UserManagementHandler) SubmitServiceDocuments(w http.ResponseWriter, r 
 		docStr = "{}"
 	}
 
+	// The repository scopes the update to (asset_id, user_id), so a user cannot
+	// attach documents to somebody else's service.
 	updated, err := h.userService.SubmitSkillAssetDocuments(r.Context(), assetID, targetUser.ID, docStr)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to submit service documents", err.Error())
@@ -464,6 +524,9 @@ func (h *UserManagementHandler) SubmitServiceDocuments(w http.ResponseWriter, r 
 }
 
 func (h *UserManagementHandler) ListServiceRequests(w http.ResponseWriter, r *http.Request) {
+	if _, err := authz.RequireAdmin(r); authz.Write(w, err) {
+		return
+	}
 	status := r.URL.Query().Get("status")
 	requests, err := h.userService.ListAllUserSkillAssetRequests(r.Context(), status)
 	if err != nil {
@@ -480,8 +543,7 @@ type AdminReviewDocumentsPayload struct {
 }
 
 func (h *UserManagementHandler) AdminApproveServiceRequest(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.requireAdmin(r); err != nil {
-		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+	if _, err := h.requireAdmin(r); authz.Write(w, err) {
 		return
 	}
 	assetIDStr := chi.URLParam(r, "id")
@@ -501,8 +563,7 @@ func (h *UserManagementHandler) AdminApproveServiceRequest(w http.ResponseWriter
 }
 
 func (h *UserManagementHandler) AdminReviewServiceDocuments(w http.ResponseWriter, r *http.Request) {
-	if _, err := h.requireAdmin(r); err != nil {
-		response.Error(w, http.StatusForbidden, "Admin credentials required", nil)
+	if _, err := h.requireAdmin(r); authz.Write(w, err) {
 		return
 	}
 	assetIDStr := chi.URLParam(r, "id")
@@ -533,18 +594,23 @@ func (h *UserManagementHandler) AdminReviewServiceDocuments(w http.ResponseWrite
 }
 
 func (h *UserManagementHandler) GetUserServices(w http.ResponseWriter, r *http.Request) {
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
+		return
+	}
+
 	userIDStr := r.URL.Query().Get("user_id")
 	phoneStr := r.URL.Query().Get("phone")
 
 	var targetUser *domain.User
 	if userIDStr != "" {
-		uid, parseErr := uuid.Parse(userIDStr)
-		if parseErr == nil {
-			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
-		}
+		targetUser, _ = h.resolveUser(r.Context(), userIDStr)
 	}
 	if targetUser == nil && phoneStr != "" {
 		targetUser, _ = h.userRepo.GetByPhone(r.Context(), phoneStr)
+	}
+	if targetUser == nil && userIDStr == "" && phoneStr == "" {
+		targetUser = caller
 	}
 
 	if targetUser == nil {
@@ -558,7 +624,7 @@ func (h *UserManagementHandler) GetUserServices(w http.ResponseWriter, r *http.R
 		return
 	}
 
-	// IDOR Protection: Private KYC and compliance documents are restricted to the service owner or Admin
+	// Private KYC and compliance documents are restricted to the service owner or an admin.
 	if !h.authorizeUserAccess(r, targetUser.ID) {
 		for _, svc := range services {
 			svc.Documents = []byte("{}")
@@ -568,115 +634,81 @@ func (h *UserManagementHandler) GetUserServices(w http.ResponseWriter, r *http.R
 	response.JSON(w, http.StatusOK, "User services retrieved successfully", services)
 }
 
-
 type UpdateUserStatusPayload struct {
 	UserID string `json:"user_id"`
 	Phone  string `json:"phone"`
-	Status string `json:"status"` // e.g. ACTIVE, SUSPENDED, DEACTIVATED
+	Status string `json:"status"` // ACTIVE, SUSPENDED, ...
 }
 
+var allowedStatusUpdates = map[domain.UserStatus]bool{
+	domain.StatusPending:          true,
+	domain.StatusOTPVerified:      true,
+	domain.StatusProfileCompleted: true,
+	domain.StatusActive:           true,
+	domain.StatusSuspended:        true,
+	"DEACTIVATED":                 true,
+}
+
+// UpdateStatus changes an account status. Admin only; changing the status of
+// another administrator requires SUPER_ADMIN.
 func (h *UserManagementHandler) UpdateStatus(w http.ResponseWriter, r *http.Request) {
+	actor, err := authz.RequireAdmin(r)
+	if authz.Write(w, err) {
+		return
+	}
+
 	var p UpdateUserStatusPayload
 	if err := json.NewDecoder(r.Body).Decode(&p); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
+	status := domain.UserStatus(p.Status)
+	if !allowedStatusUpdates[status] {
+		response.Error(w, http.StatusBadRequest, "Unsupported status value", nil)
+		return
+	}
 
 	var targetUser *domain.User
 	if p.UserID != "" {
-		uid, parseErr := uuid.Parse(p.UserID)
-		if parseErr == nil {
+		if uid, parseErr := uuid.Parse(p.UserID); parseErr == nil {
 			targetUser, _ = h.userRepo.GetByID(r.Context(), uid)
 		}
 	}
 	if targetUser == nil && p.Phone != "" {
 		targetUser, _ = h.userRepo.GetByPhone(r.Context(), p.Phone)
 	}
-
 	if targetUser == nil {
 		response.Error(w, http.StatusBadRequest, "User not found", nil)
 		return
 	}
+	if targetUser.IsAdmin() && targetUser.ID != actor.ID && !actor.IsSuperAdmin() {
+		response.Error(w, http.StatusForbidden, "Only a SUPER_ADMIN can change another administrator's status", nil)
+		return
+	}
 
-	updated, err := h.userService.UpdateUserStatus(r.Context(), targetUser.ID, domain.UserStatus(p.Status))
+	updated, err := h.userService.UpdateUserStatus(r.Context(), targetUser.ID, status)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to update user status", err.Error())
 		return
 	}
+	updated.OTPCode = ""
 
 	response.JSON(w, http.StatusOK, "User status updated successfully", updated)
 }
 
+// requireAdmin allows ADMIN and SUPER_ADMIN, using only the verified identity.
 func (h *UserManagementHandler) requireAdmin(r *http.Request) (*domain.User, error) {
-	if h.userRepo == nil {
-		return nil, fmt.Errorf("user repository unavailable")
-	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil && u.Role == domain.RoleAdmin {
-				return u, nil
-			}
-		}
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	return nil, fmt.Errorf("admin credentials required")
+	return authz.RequireAdmin(r)
 }
 
+// authorizeUserAccess reports whether the verified caller is the target user or an admin.
 func (h *UserManagementHandler) authorizeUserAccess(r *http.Request, targetUserID uuid.UUID) bool {
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		caller, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && caller != nil {
-			return caller.Role == domain.RoleAdmin || caller.ID == targetUserID
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if caller, _ := h.userRepo.GetByID(r.Context(), uid); caller != nil {
-				return caller.Role == domain.RoleAdmin || caller.ID == targetUserID
-			}
-		}
-		if caller, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); caller != nil {
-			return caller.Role == domain.RoleAdmin || caller.ID == targetUserID
-		}
-	}
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-		if xid, err := uuid.Parse(r.Header.Get("X-User-ID")); err == nil && xid == targetUserID {
-			return true
-		}
-		// Local test runner compatibility
-		if r.Header.Get("Authorization") == "" && r.Header.Get("X-User-ID") == "" {
-			return true
-		}
-	}
-	return false
+	_, err := authz.RequireSelfOrAdmin(r, targetUserID)
+	return err == nil
 }
 
-// User Saved Address Handlers
-
+// resolveUser finds a user by id, phone or account identifier. It only LOCATES a
+// record; callers must still authorise access to it.
 func (h *UserManagementHandler) resolveUser(ctx context.Context, input string) (*domain.User, error) {
 	if input == "" {
 		return nil, fmt.Errorf("user identifier is empty")
@@ -692,37 +724,47 @@ func (h *UserManagementHandler) resolveUser(ctx context.Context, input string) (
 	if u, err := h.userRepo.GetBySupabaseUID(ctx, input); err == nil && u != nil {
 		return u, nil
 	}
-	return nil, fmt.Errorf("user not found for identifier: %s", input)
+	return nil, fmt.Errorf("user not found for identifier")
 }
 
-func (h *UserManagementHandler) GetUserAddresses(w http.ResponseWriter, r *http.Request) {
-	userIDStr := chi.URLParam(r, "userId")
-	if userIDStr == "" {
-		userIDStr = r.URL.Query().Get("user_id")
+// addressTarget resolves the {userId} path (or ?user_id=) and authorises the caller.
+func (h *UserManagementHandler) addressTarget(w http.ResponseWriter, r *http.Request) (*domain.User, bool) {
+	caller, err := authz.CurrentUser(r)
+	if authz.Write(w, err) {
+		return nil, false
 	}
-
-	if userIDStr == "" {
-		response.Error(w, http.StatusBadRequest, "userId parameter is required", nil)
-		return
+	idStr := chi.URLParam(r, "userId")
+	if idStr == "" {
+		idStr = r.URL.Query().Get("user_id")
 	}
-
-	targetUser, err := h.resolveUser(r.Context(), userIDStr)
-	if err != nil || targetUser == nil {
+	if idStr == "" {
+		return caller, true
+	}
+	target, rerr := h.resolveUser(r.Context(), idStr)
+	if rerr != nil || target == nil {
 		response.Error(w, http.StatusNotFound, "User not found", nil)
+		return nil, false
+	}
+	if target.ID != caller.ID && !caller.IsAdmin() {
+		response.Error(w, http.StatusForbidden, "Access denied: you do not have permission to access this user's saved addresses", nil)
+		return nil, false
+	}
+	return target, true
+}
+
+// User Saved Address Handlers
+
+func (h *UserManagementHandler) GetUserAddresses(w http.ResponseWriter, r *http.Request) {
+	target, ok := h.addressTarget(w, r)
+	if !ok {
 		return
 	}
 
-	if !h.authorizeUserAccess(r, targetUser.ID) {
-		response.Error(w, http.StatusForbidden, "Access denied: you do not have permission to view this user's saved addresses", nil)
-		return
-	}
-
-	addresses, err := h.userService.GetUserAddresses(r.Context(), targetUser.ID)
+	addresses, err := h.userService.GetUserAddresses(r.Context(), target.ID)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to retrieve saved addresses", err.Error())
 		return
 	}
-
 	if addresses == nil {
 		addresses = []*domain.UserAddress{}
 	}
@@ -731,9 +773,9 @@ func (h *UserManagementHandler) GetUserAddresses(w http.ResponseWriter, r *http.
 }
 
 func (h *UserManagementHandler) CreateUserAddress(w http.ResponseWriter, r *http.Request) {
-	userIDStr := chi.URLParam(r, "userId")
-	if userIDStr == "" {
-		userIDStr = r.URL.Query().Get("user_id")
+	target, ok := h.addressTarget(w, r)
+	if !ok {
+		return
 	}
 
 	var addr domain.UserAddress
@@ -741,22 +783,8 @@ func (h *UserManagementHandler) CreateUserAddress(w http.ResponseWriter, r *http
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
-	if addr.UserID == uuid.Nil && userIDStr != "" {
-		if u, err := h.resolveUser(r.Context(), userIDStr); err == nil && u != nil {
-			addr.UserID = u.ID
-		}
-	}
-
-	if addr.UserID == uuid.Nil {
-		response.Error(w, http.StatusBadRequest, "user_id is required", nil)
-		return
-	}
-
-	if !h.authorizeUserAccess(r, addr.UserID) {
-		response.Error(w, http.StatusForbidden, "Access denied: you do not have permission to create addresses for this user", nil)
-		return
-	}
+	// Ownership comes from the authorised target, never from the body.
+	addr.UserID = target.ID
 
 	created, err := h.userService.CreateUserAddress(r.Context(), &addr)
 	if err != nil {
@@ -768,30 +796,23 @@ func (h *UserManagementHandler) CreateUserAddress(w http.ResponseWriter, r *http
 }
 
 func (h *UserManagementHandler) UpdateUserAddress(w http.ResponseWriter, r *http.Request) {
-	userIDStr := chi.URLParam(r, "userId")
-	addressIDStr := chi.URLParam(r, "addressId")
+	target, ok := h.addressTarget(w, r)
+	if !ok {
+		return
+	}
 
 	var addr domain.UserAddress
 	if err := json.NewDecoder(r.Body).Decode(&addr); err != nil {
 		response.Error(w, http.StatusBadRequest, "Invalid request JSON payload", err.Error())
 		return
 	}
-
-	if addressIDStr != "" {
-		aid, parseErr := uuid.Parse(addressIDStr)
-		if parseErr == nil {
-			addr.ID = aid
-		}
+	if aid, parseErr := uuid.Parse(chi.URLParam(r, "addressId")); parseErr == nil {
+		addr.ID = aid
 	}
+	addr.UserID = target.ID
 
-	if addr.UserID == uuid.Nil && userIDStr != "" {
-		if u, err := h.resolveUser(r.Context(), userIDStr); err == nil && u != nil {
-			addr.UserID = u.ID
-		}
-	}
-
-	if addr.ID == uuid.Nil || addr.UserID == uuid.Nil {
-		response.Error(w, http.StatusBadRequest, "addressId and userId are required", nil)
+	if addr.ID == uuid.Nil {
+		response.Error(w, http.StatusBadRequest, "addressId is required", nil)
 		return
 	}
 
@@ -805,17 +826,17 @@ func (h *UserManagementHandler) UpdateUserAddress(w http.ResponseWriter, r *http
 }
 
 func (h *UserManagementHandler) SetDefaultUserAddress(w http.ResponseWriter, r *http.Request) {
-	userIDStr := chi.URLParam(r, "userId")
-	addressIDStr := chi.URLParam(r, "addressId")
-
-	targetUser, err := h.resolveUser(r.Context(), userIDStr)
-	aid, parseErr := uuid.Parse(addressIDStr)
-	if err != nil || parseErr != nil || targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "Invalid userId or addressId format", nil)
+	target, ok := h.addressTarget(w, r)
+	if !ok {
+		return
+	}
+	aid, parseErr := uuid.Parse(chi.URLParam(r, "addressId"))
+	if parseErr != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid addressId format", nil)
 		return
 	}
 
-	updated, err := h.userService.SetDefaultAddress(r.Context(), targetUser.ID, aid)
+	updated, err := h.userService.SetDefaultAddress(r.Context(), target.ID, aid)
 	if err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to set default address", err.Error())
 		return
@@ -825,23 +846,21 @@ func (h *UserManagementHandler) SetDefaultUserAddress(w http.ResponseWriter, r *
 }
 
 func (h *UserManagementHandler) DeleteUserAddress(w http.ResponseWriter, r *http.Request) {
-	userIDStr := chi.URLParam(r, "userId")
+	target, ok := h.addressTarget(w, r)
+	if !ok {
+		return
+	}
 	addressIDStr := chi.URLParam(r, "addressId")
-
-	targetUser, err := h.resolveUser(r.Context(), userIDStr)
 	aid, parseErr := uuid.Parse(addressIDStr)
-	if err != nil || parseErr != nil || targetUser == nil {
-		response.Error(w, http.StatusBadRequest, "Invalid userId or addressId format", nil)
+	if parseErr != nil {
+		response.Error(w, http.StatusBadRequest, "Invalid addressId format", nil)
 		return
 	}
 
-	if err := h.userService.DeleteUserAddress(r.Context(), targetUser.ID, aid); err != nil {
+	if err := h.userService.DeleteUserAddress(r.Context(), target.ID, aid); err != nil {
 		response.Error(w, http.StatusInternalServerError, "Failed to delete saved address", err.Error())
 		return
 	}
 
 	response.JSON(w, http.StatusOK, "Saved address deleted successfully", map[string]string{"id": addressIDStr})
 }
-
-
-
