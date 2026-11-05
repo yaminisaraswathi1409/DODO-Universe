@@ -45,7 +45,8 @@ export default function AdminLoginPage() {
         setDemoOtp(res.dev_otp_code);
         setOtpCode(res.dev_otp_code);
       } else {
-        setOtpCode('123456');
+        setDemoOtp('');
+        setOtpCode('');
       }
     } catch (err: any) {
       setError(err.message || 'Failed to request Admin OTP');

@@ -2,13 +2,11 @@ package handler
 
 import (
 	"encoding/json"
-	"fmt"
 	"net/http"
-	"os"
-	"strings"
 
 	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
 	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
@@ -29,78 +27,20 @@ func NewFormEngineHandler(formService *service.FormEngineService, userRepo *post
 }
 
 func (h *FormEngineHandler) requireAdmin(r *http.Request) (*domain.User, error) {
-	if h.userRepo == nil {
-		return nil, fmt.Errorf("user repository unavailable")
-	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil && u.Role == domain.RoleAdmin {
-				return u, nil
-			}
-		}
-		if u, _ := h.userRepo.GetBySupabaseUID(r.Context(), tokenStr); u != nil && u.Role == domain.RoleAdmin {
-			return u, nil
-		}
-	}
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-		if authHeader == "" && r.Header.Get("X-User-ID") == "" {
-			users, err := h.userRepo.ListUsers(r.Context())
-			if err == nil && len(users) > 0 {
-				return users[0], nil
-			}
-		}
-	}
-	return nil, fmt.Errorf("admin credentials required")
+	return authz.RequireAdmin(r)
 }
 
+// authorizeSubmission allows the submitter or an admin. Submissions without an
+// owner are admin-only.
 func (h *FormEngineHandler) authorizeSubmission(r *http.Request, submitterID *uuid.UUID) bool {
+	caller, err := authz.CurrentUser(r)
+	if err != nil {
+		return false
+	}
 	if submitterID == nil || *submitterID == uuid.Nil {
-		return true
+		return caller.IsAdmin()
 	}
-	if h.userRepo == nil {
-		return true
-	}
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if ok && claims.SupabaseUID != "" {
-		u, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
-		if err == nil && u != nil {
-			return u.Role == domain.RoleAdmin || u.ID == *submitterID
-		}
-	}
-	authHeader := r.Header.Get("Authorization")
-	if authHeader != "" {
-		parts := strings.Split(authHeader, " ")
-		tokenStr := authHeader
-		if len(parts) == 2 && strings.ToLower(parts[0]) == "bearer" {
-			tokenStr = parts[1]
-		}
-		if uid, err := uuid.Parse(tokenStr); err == nil {
-			if u, _ := h.userRepo.GetByID(r.Context(), uid); u != nil {
-				return u.Role == domain.RoleAdmin || u.ID == *submitterID
-			}
-		}
-	}
-	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
-	appEnv := strings.ToLower(strings.TrimSpace(os.Getenv("APP_ENV")))
-	if env != "production" && env != "prod" && appEnv != "production" && appEnv != "prod" {
-		return true
-	}
-	return false
+	return caller.IsAdmin() || caller.ID == *submitterID
 }
 
 // CreateSchema creates a new form schema (Admin only)

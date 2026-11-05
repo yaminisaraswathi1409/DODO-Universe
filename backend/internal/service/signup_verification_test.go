@@ -7,8 +7,8 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/uop/backend/internal/auth"
 	"github.com/uop/backend/internal/domain"
-	"github.com/uop/backend/internal/service"
 )
 
 // MockUserRepository for Signup & OTP testing
@@ -105,7 +105,10 @@ func TestSignup_EndToEndVerification(t *testing.T) {
 	}
 
 	// 4. OTP Generation and Delivery mechanism
-	otpCode := service.GenerateRandomOTP()
+	otpCode, otpErr := auth.GenerateOTP()
+	if otpErr != nil {
+		t.Fatalf("otp generation failed: %v", otpErr)
+	}
 	if len(otpCode) != 6 {
 		t.Fatalf("Expected 6-digit OTP code, got: %s", otpCode)
 	}

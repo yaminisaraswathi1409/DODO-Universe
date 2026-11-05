@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 
+	"github.com/uop/backend/internal/authz"
 	"github.com/uop/backend/internal/domain"
 	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/internal/repository/postgres"
@@ -33,6 +34,15 @@ func (h *AuthHandler) SyncProfile(w http.ResponseWriter, r *http.Request) {
 	claims, ok := middleware.GetUserClaims(r.Context())
 	if !ok {
 		response.Error(w, http.StatusUnauthorized, "Unauthorized", nil)
+		return
+	}
+
+	// Accounts created through the OTP flow already exist and must not be
+	// rewritten from request data (this would let a caller change their phone
+	// number without OTP verification). Return the stored profile unchanged.
+	if existing, aerr := authz.CurrentUser(r); aerr == nil && existing != nil {
+		existing.OTPCode = ""
+		response.JSON(w, http.StatusOK, "User profile already synchronized", existing)
 		return
 	}
 
@@ -66,24 +76,34 @@ func (h *AuthHandler) SyncProfile(w http.ResponseWriter, r *http.Request) {
 	response.JSON(w, http.StatusOK, "User profile synchronized successfully", saved)
 }
 
-// GetMe returns current authenticated user profile
+// meResponse is the user profile plus the explicit driver identity (if any).
+// The user fields stay at the top level, so existing clients are unaffected.
+type meResponse struct {
+	*domain.User
+	// DriverProfile is null unless the user has an explicit driver_profiles record.
+	// Clients must use driver_profile.status == "APPROVED" (never an asset type)
+	// to decide whether to show driver features.
+	DriverProfile *domain.DriverProfile `json:"driver_profile"`
+}
+
+// GetMe returns the authenticated user's profile.
 func (h *AuthHandler) GetMe(w http.ResponseWriter, r *http.Request) {
-	claims, ok := middleware.GetUserClaims(r.Context())
-	if !ok {
+	if _, ok := middleware.GetUserClaims(r.Context()); !ok {
 		response.Error(w, http.StatusUnauthorized, "Unauthorized", nil)
 		return
 	}
 
-	user, err := h.userRepo.GetBySupabaseUID(r.Context(), claims.SupabaseUID)
+	user, err := authz.CurrentUser(r)
 	if err != nil {
-		response.Error(w, http.StatusInternalServerError, "Failed to fetch user profile", err.Error())
-		return
-	}
-
-	if user == nil {
 		response.Error(w, http.StatusNotFound, "User profile not found. Please sync profile.", nil)
 		return
 	}
+	user.OTPCode = ""
 
-	response.JSON(w, http.StatusOK, "User profile fetched successfully", user)
+	profile, perr := h.userRepo.GetDriverProfile(r.Context(), user.ID)
+	if perr != nil {
+		profile = nil
+	}
+
+	response.JSON(w, http.StatusOK, "User profile fetched successfully", meResponse{User: user, DriverProfile: profile})
 }

@@ -14,7 +14,6 @@ import (
 	chimiddleware "github.com/go-chi/chi/v5/middleware"
 	"github.com/go-chi/cors"
 	"github.com/uop/backend/internal/config"
-	"github.com/uop/backend/internal/middleware"
 	"github.com/uop/backend/pkg/response"
 )
 
@@ -64,17 +63,11 @@ func main() {
 			})
 		})
 
-		// Authenticated Routes (Protected by Supabase JWT validation)
-		r.Group(func(r chi.Router) {
-			r.Use(middleware.JWTAuthMiddleware(cfg.SupabaseJWTSecret))
-
-			r.Get("/users/me", func(w http.ResponseWriter, r *http.Request) {
-				userID := r.Context().Value("user_id")
-				response.JSON(w, http.StatusOK, "Authenticated user profile fetched", map[string]interface{}{
-					"user_id": userID,
-					"service": "user-service-proxy",
-				})
-			})
+		// Authenticated routes are not proxied by this stub gateway. The previous
+		// placeholder accepted any Bearer value; identity is now verified only by
+		// the core API (cmd/api), so this route refuses instead of faking a user.
+		r.Get("/users/me", func(w http.ResponseWriter, r *http.Request) {
+			response.Error(w, http.StatusNotImplemented, "Not implemented on the gateway stub: use the core API /api/v1/users/me", nil)
 		})
 	})
 

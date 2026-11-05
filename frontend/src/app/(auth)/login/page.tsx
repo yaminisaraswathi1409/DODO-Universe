@@ -61,7 +61,7 @@ export default function UserLoginPage() {
 
     try {
       const res: any = await requestOTP(phone);
-      const devCode = res?.dev_otp_code || res?.otp_code || '123456';
+      const devCode = res?.dev_otp_code || '';
       setDemoOtp(devCode);
       setStep('OTP');
     } catch (err: any) {
